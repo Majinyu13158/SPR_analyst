@@ -1,0 +1,22 @@
+import ctypes
+import sys
+import os
+
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def run_as_admin(target_script):
+    if is_admin():
+        print("已以管理员权限运行。")
+        # 如果是管理员权限，直接运行目标脚本
+        os.system(f"python D:\python\pythonProject4\LocalBivariate.py")
+    else:
+        print("尝试以管理员权限运行...")
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f"D:\python\pythonProject4\LocalBivariate.py", None, 1)
+        sys.exit()
+
+if __name__ == "__main__":
+    run_as_admin("D:\python\pythonProject4\LocalBivariate.py")

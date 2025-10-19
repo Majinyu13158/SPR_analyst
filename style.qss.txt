@@ -1,0 +1,111 @@
+/* 全局基础样式 */
+* {
+    font-family: 'Segoe UI', Tahoma, sans-serif; /* 设置字体 */
+    outline: none; /* 移除默认轮廓 */
+}
+
+/* 窗口背景 */
+QWidget {
+    background-color: #0a0a23; /* 深蓝色背景 */
+    color: #ffffff; /* 文本颜色 */
+}
+
+/* 按钮样式 */
+QPushButton {
+    background-color: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 1,
+                                      stop: 0 #0099cc, stop: 1 #0066cc); /* 蓝色渐变 */
+    border: 1px solid #004d99; /* 边框颜色 */
+    border-radius: 8px; /* 圆角边框 */
+    padding: 8px;
+    color: #ffffff;
+}
+
+QPushButton:hover {
+    background-color: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 1,
+                                      stop: 0 #00aaff, stop: 1 #0077dd); /* 鼠标悬停时的渐变 */
+}
+
+QPushButton:pressed {
+    background-color: #005599; /* 按下时的颜色 */
+}
+
+/* 输入框样式 */
+QLineEdit {
+    padding: 5px;
+    border: 1px solid #004d99;
+    border-radius: 5px;
+    background: #1a1a5e; /* 较浅的蓝色背景 */
+    color: #ffffff;
+}
+
+QLineEdit:focus {
+    border: 1px solid #00aaff; /* 获得焦点时的边框颜色 */
+}
+
+/* 滚动条样式 */
+QScrollBar:vertical {
+    border: none;
+    background-color: transparent;
+    width: 10px;
+    margin: 0px, 0px, 0px, 0px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #0077dd;
+    border: 1px solid #004d99;
+    border-radius: 5px;
+    min-height: 30px;
+}
+
+QScrollBar::add-line:vertical {
+    height: 10px;
+    subcontrol-origin: margin;
+    subcontrol-position: bottom;
+    border: 1px solid #004d99;
+    border-radius: 5px;
+    background: #1a1a5e;
+}
+
+QScrollBar::sub-line:vertical {
+    height: 10px;
+    subcontrol-origin: margin;
+    subcontrol-position: top;
+    border: 1px solid #004d99;
+    border-radius: 5px;
+    background: #1a1a5e;
+}
+
+/* 标签页样式 */
+QTabBar::tab {
+    background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 1,
+                                stop: 0 #0099cc, stop: 1 #0066cc);
+    border: 1px solid #004d99;
+    border-radius: 5px 5px 0 0;
+    padding: 5px;
+    color: #ffffff;
+}
+
+QTabBar::tab:selected, QTabBar::tab:hover {
+    background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 1,
+                                stop: 0 #00aaff, stop: 1 #0077dd);
+}
+
+/* 工具提示样式 */
+QToolTip {
+    border: 1px solid #004d99;
+    background-color: #1a1a5e;
+    color: #ffffff;
+    padding: 5px;
+    border-radius: 5px;
+}
+
+/* 动画效果 */
+QPropertyAnimation {
+    duration: 300; /* 动画持续时间 */
+}
+
+QPushButton {
+    QPropertyAnimation: hover { properties: "background-color"; }
+}
+
+/* 其他控件样式可以根据需要添加 */
