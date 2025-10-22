@@ -113,8 +113,19 @@ def model_runner(filename):
     T_data = T_data.transpose()
     T_data = T_data.astype(np.longdouble)
 
-    # 分段时间
-    time_break = 133
+    # 分段时间（自动估计：找到Y值最大值的位置）
+    try:
+        Y_max_idx = np.unravel_index(np.argmax(Y_data), Y_data.shape)[0]
+        time_break = float(T_data[Y_max_idx, 0])
+        # 确保time_break在合理范围内
+        if time_break < 1 or time_break >= T_data.shape[0]:
+            time_break = T_data.shape[0] // 2
+        print(f"[AutoEstimate] time_break: {time_break} (Y_max at row {Y_max_idx})")
+    except Exception as e:
+        # 回退：使用数据范围的一半
+        time_break = T_data.shape[0] // 2
+        print(f"[Warning] time_break estimation failed, using default: {time_break}, error: {e}")
+    
     R_guess
 
     # 初始参数猜测
@@ -141,7 +152,18 @@ def model_runner(filename):
     print(Y_pred.shape)
 
     # 做图看看效果
-    return T_data, Y_data, Y_pred
+    # ⭐ 返回数据和参数（用于新项目）
+    return {
+        'T_data': T_data,
+        'Y_data': Y_data,
+        'Y_pred': Y_pred,
+        'parameters': {
+            'Rmax': R_opt,
+            'kon': ka_opt_p,
+            'koff': kd_opt_p,
+            'KD': kd_opt_p / ka_opt_p
+        }
+    }
     # 创建一个figure和一个axes
     '''plt.figure(dpi=300)
     fig, ax = plt.subplots()

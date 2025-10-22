@@ -2,19 +2,21 @@
 """
 Model层 - 数据模型和业务逻辑
 """
-from .data_model import Data, DataSimple, DataManager
+from .data_model import Data, DataManager
 from .figure_model import Figure, FigureManager
 from .result_model import FittingResult, ResultManager
 from .project_model import Project, ProjectManager, ProjectDetails
 from .link_manager import LinkManager
 from .session_manager import SessionManager
+from .series_model import Series, SeriesManager
 
 __all__ = [
-    'Data', 'DataSimple', 'DataManager',
+    'Data', 'DataManager',
     'Figure', 'FigureManager',
     'FittingResult', 'ResultManager',
     'Project', 'ProjectManager', 'ProjectDetails',
     'LinkManager',
-    'SessionManager'
+    'SessionManager',
+    'Series', 'SeriesManager'
 ]
 

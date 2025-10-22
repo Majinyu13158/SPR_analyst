@@ -18,7 +18,7 @@ import tempfile
 import shutil
 from datetime import datetime
 
-from .data_model import DataManager
+from .data_model import DataManager, Data
 from .figure_model import FigureManager
 from .result_model import ResultManager
 from .project_model import ProjectManager
@@ -185,38 +185,81 @@ class SessionManager(QObject):
                 
                 # 1. 保存manifest.json
                 manifest = self._create_manifest()
+                # 附加schema信息与要求文件
+                manifest.update({
+                    'schema_version': '1.0',
+                    'required_files': [
+                        'manifest.json', 'data.json', 'figures.json',
+                        'results.json', 'projects.json', 'links.json'
+                    ]
+                })
                 with open(temp_path / 'manifest.json', 'w', encoding='utf-8') as f:
                     json.dump(manifest, f, indent=2, ensure_ascii=False)
                 
-                # 2. 保存数据对象
-                data_export = self._export_data_manager()
+                # 2. 保存数据帧文件（parquet优先，失败则csv），并记录映射
+                (temp_path / 'data').mkdir(parents=True, exist_ok=True)
+                data_files_map = {}
+                for data_id, data in self.data_manager._data_dict.items():
+                    # 统一取可用的DataFrame
+                    df = getattr(data, 'dataframe', None)
+                    if df is None or getattr(df, 'empty', True):
+                        df = getattr(data, 'processed_data', None)
+                    if df is None or getattr(df, 'empty', True):
+                        continue
+                    # 先尝试parquet
+                    rel_name = f"data/{data_id}.parquet"
+                    abs_path = temp_path / rel_name
+                    ok = False
+                    try:
+                        df.to_parquet(abs_path, index=False)
+                        ok = True
+                    except Exception:
+                        # 退化为csv
+                        rel_name = f"data/{data_id}.csv"
+                        abs_path = temp_path / rel_name
+                        try:
+                            df.to_csv(abs_path, index=False)
+                            ok = True
+                        except Exception:
+                            ok = False
+                    if ok:
+                        data_files_map[str(data_id)] = rel_name
+
+                # 3. 保存数据对象索引（包含文件映射）
+                data_export = self._export_data_manager(file_map=data_files_map)
                 with open(temp_path / 'data.json', 'w', encoding='utf-8') as f:
                     json.dump(data_export, f, indent=2, ensure_ascii=False)
                 
-                # 3. 保存图表对象
+                # 4. 保存图表对象
                 figures_export = self._export_figure_manager()
                 with open(temp_path / 'figures.json', 'w', encoding='utf-8') as f:
                     json.dump(figures_export, f, indent=2, ensure_ascii=False)
                 
-                # 4. 保存结果对象
+                # 5. 保存结果对象
                 results_export = self._export_result_manager()
                 with open(temp_path / 'results.json', 'w', encoding='utf-8') as f:
                     json.dump(results_export, f, indent=2, ensure_ascii=False)
                 
-                # 5. 保存项目对象
+                # 6. 保存项目对象
                 projects_export = self._export_project_manager()
                 with open(temp_path / 'projects.json', 'w', encoding='utf-8') as f:
                     json.dump(projects_export, f, indent=2, ensure_ascii=False)
                 
-                # 6. 保存链接关系
+                # 7. 保存链接关系
                 links_export = self.link_manager.to_dict()
                 with open(temp_path / 'links.json', 'w', encoding='utf-8') as f:
                     json.dump(links_export, f, indent=2, ensure_ascii=False)
                 
-                # 7. 创建ZIP文件
+                # 8. 创建ZIP文件
                 with zipfile.ZipFile(file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                     for file in temp_path.iterdir():
                         zipf.write(file, file.name)
+                    # 写入子目录内容（如 data/*）
+                    for subdir in temp_path.iterdir():
+                        if subdir.is_dir():
+                            for p in subdir.rglob('*'):
+                                arcname = str(p.relative_to(temp_path))
+                                zipf.write(p, arcname)
             
             # 更新状态
             self.current_file_path = str(file_path)
@@ -262,6 +305,10 @@ class SessionManager(QObject):
                 # 1. 解压ZIP文件
                 with zipfile.ZipFile(file_path, 'r') as zipf:
                     zipf.extractall(temp_path)
+                # 1.1 校验包结构
+                if not self._validate_unpacked(temp_path):
+                    print("[SessionManager] 会话文件结构校验失败")
+                    return False
                 
                 # 2. 加载manifest
                 with open(temp_path / 'manifest.json', 'r', encoding='utf-8') as f:
@@ -271,7 +318,7 @@ class SessionManager(QObject):
                 # 3. 加载数据对象
                 with open(temp_path / 'data.json', 'r', encoding='utf-8') as f:
                     data_export = json.load(f)
-                self._import_data_manager(data_export)
+                self._import_data_manager(data_export, base_path=temp_path)
                 
                 # 4. 加载图表对象
                 with open(temp_path / 'figures.json', 'r', encoding='utf-8') as f:
@@ -330,8 +377,12 @@ class SessionManager(QObject):
         created_str = manifest.get('created_time')
         if created_str:
             self.created_time = datetime.fromisoformat(created_str)
+        # 可选：校验版本
+        schema_version = manifest.get('schema_version')
+        if schema_version and schema_version != '1.0':
+            print(f"[SessionManager] 警告：不匹配的schema版本 {schema_version}")
     
-    def _export_data_manager(self) -> Dict:
+    def _export_data_manager(self, file_map: Dict[str, str] = None) -> Dict:
         """导出DataManager数据"""
         # 简化版本：只导出基本信息
         data_list = []
@@ -348,15 +399,46 @@ class SessionManager(QObject):
         return {
             'version': '1.0',
             'data_list': data_list,
-            'counter': self.data_manager._counter
+            'counter': self.data_manager._counter,
+            'files': file_map or {}
         }
     
-    def _import_data_manager(self, data: Dict):
+    def _import_data_manager(self, data: Dict, base_path: Path = None):
         """导入DataManager数据"""
-        # 简化版本：暂时不恢复DataFrame
-        # 完整版本需要从Parquet文件恢复
-        self.data_manager._counter = data.get('counter', 0)
-        print(f"[SessionManager] 导入了 {len(data.get('data_list', []))} 个数据对象（简化版）")
+        # 从文件映射恢复DataFrame（优先parquet，退化csv）
+        files_map: Dict[str, str] = data.get('files', {})
+        recovered = 0
+        if base_path is None:
+            base_path = Path('.')
+        for info in data.get('data_list', []):
+            data_id = info.get('id')
+            name = info.get('name', f"数据{data_id}")
+            rel = files_map.get(str(data_id))
+            df = None
+            if rel:
+                fpath = base_path / rel
+                try:
+                    if fpath.suffix.lower() == '.parquet':
+                        import pandas as pd
+                        df = pd.read_parquet(fpath)
+                    elif fpath.suffix.lower() == '.csv':
+                        import pandas as pd
+                        df = pd.read_csv(fpath)
+                except Exception:
+                    df = None
+            # 构造Data对象并保持原ID（使用融合版Data类）
+            data_obj = Data(item=df, itemtype='dataframe', parent=self.data_manager)
+            data_obj.set_name(name)
+            self.data_manager._data_dict[int(data_id)] = data_obj
+            recovered += 1
+        # 恢复计数器
+        # 优先使用保存的counter，否则设置为 max_id+1
+        saved_counter = data.get('counter')
+        if isinstance(saved_counter, int):
+            self.data_manager._counter = saved_counter
+        else:
+            self.data_manager._counter = (max(self.data_manager._data_dict.keys()) + 1) if self.data_manager._data_dict else 0
+        print(f"[SessionManager] 导入了 {recovered} 个数据对象（含DataFrame恢复）")
     
     def _export_figure_manager(self) -> Dict:
         """导出FigureManager数据"""
@@ -434,6 +516,29 @@ class SessionManager(QObject):
         self.project_manager._next_id = data.get('next_id', data.get('counter', 1))
         self.project_manager._current_project_id = data.get('current_project_id')
         print(f"[SessionManager] 导入了 {len(data.get('project_list', []))} 个项目对象（简化版）")
+
+    # ========== 基础校验 ==========
+    def _validate_unpacked(self, base_path: Path) -> bool:
+        """校验解压后的基础文件结构与JSON格式"""
+        required = ['manifest.json', 'data.json', 'figures.json', 'results.json', 'projects.json', 'links.json']
+        for name in required:
+            p = base_path / name
+            if not p.exists():
+                print(f"[SessionManager] 缺少必要文件: {name}")
+                return False
+            # 基本JSON可读性校验
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    json.load(f)
+            except Exception as e:
+                print(f"[SessionManager] JSON无效: {name}: {e}")
+                return False
+        # data目录可选存在
+        data_dir = base_path / 'data'
+        if data_dir.exists() and not data_dir.is_dir():
+            print("[SessionManager] data不是目录")
+            return False
+        return True
     
     # ========== 会话管理 ==========
     

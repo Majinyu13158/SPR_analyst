@@ -137,7 +137,55 @@ class Figure(QObject):
                 continue
             
             try:
-                x, y = data.get_xy_data()
+                # ⭐ 优化：对于已知格式的数据，明确指定列名
+                # 检查DataFrame列名，判断数据类型
+                if hasattr(data, 'dataframe') and data.dataframe is not None:
+                    df = data.dataframe
+                    cols = list(df.columns)
+                    # 宽表：Time + 多个浓度列 → 拆成多条曲线
+                    if 'Time' in cols and len(cols) >= 2 and not ({'XValue','YValue'} <= set(cols)):
+                        time_vals = df['Time'].to_numpy()
+                        for conc_col in cols[1:]:
+                            y_vals = df[conc_col].to_numpy()
+                            style = self._default_style()
+                            label = f"{data.name} - {conc_col}"
+                            plot_data.append({
+                                'x': time_vals,
+                                'y': y_vals,
+                                'style': style,
+                                'label': label,
+                                'data_id': data_id,
+                                'data_name': data.name
+                            })
+                        # 已处理为多曲线，继续下一个数据源
+                        continue
+                    # 拟合曲线格式：XValue, YValue
+                    if 'XValue' in cols and 'YValue' in cols:
+                        x, y = data.get_xy_data(x_col='XValue', y_col='YValue', auto_sort=False)
+                        print(f"[Figure] 拟合曲线数据: data_id={data_id}, X={x[:3]}..., Y={y[:3]}...")
+                    # SPR实验数据格式：Time, Response/RU
+                    elif 'Time' in cols:
+                        y_col = 'Response' if 'Response' in cols else ('RU' if 'RU' in cols else None)
+                        if y_col:
+                            x, y = data.get_xy_data(x_col='Time', y_col=y_col, auto_sort=False)
+                            print(f"[Figure] SPR数据: data_id={data_id}, X=Time, Y={y_col}")
+                        else:
+                            x, y = data.get_xy_data(auto_sort=False)
+                            print(f"[Figure] SPR数据(智能): data_id={data_id}")
+                    # 其他格式：使用智能选择
+                    else:
+                        x, y = data.get_xy_data(auto_sort=False)
+                        print(f"[Figure] 智能选择: data_id={data_id}, 列={cols}")
+                else:
+                    x, y = data.get_xy_data(auto_sort=False)
+                    print(f"[Figure] 默认提取: data_id={data_id}")
+                
+                # 验证数据（调试）
+                if len(x) > 0 and len(y) > 0:
+                    is_straight_line = all(abs(y[i] - x[i]) < 1e-10 for i in range(min(len(x), len(y))))
+                    if is_straight_line:
+                        print(f"[Figure] ⚠️ 警告：Y=X（直线）！data_id={data_id}, name={data.name}")
+                
                 style = self.styles.get(data_id, self._default_style())
                 
                 plot_data.append({
@@ -150,6 +198,8 @@ class Figure(QObject):
                 })
             except Exception as e:
                 print(f"[Figure] 获取数据失败 data_id={data_id}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
         return plot_data

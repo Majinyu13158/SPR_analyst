@@ -83,6 +83,16 @@ class CanvasWidget(QWidget):
         
         # 当前绘图数据（用于刷新）
         self._current_data = {}
+        # 视图持久化与交互状态
+        self._persist_xlim = None
+        self._persist_ylim = None
+        self._user_changed_view = False
+        self._is_panning = False
+        self._pan_start = None  # (xdata, ydata)
+        self._pan_orig_xlim = None
+        self._pan_orig_ylim = None
+        # 连接交互事件
+        self._connect_interactions()
     
     def _setup_ui(self):
         """设置UI"""
@@ -125,6 +135,131 @@ class CanvasWidget(QWidget):
         plt.rcParams['axes.unicode_minus'] = False
     
     # ========== 公共绘图接口 ==========
+    def _connect_interactions(self):
+        """连接鼠标滚轮缩放、右键拖拽平移、双击复位"""
+        try:
+            self.canvas.mpl_disconnect(getattr(self, '_cid_scroll', None) or 0)
+            self.canvas.mpl_disconnect(getattr(self, '_cid_press', None) or 0)
+            self.canvas.mpl_disconnect(getattr(self, '_cid_release', None) or 0)
+            self.canvas.mpl_disconnect(getattr(self, '_cid_motion', None) or 0)
+        except Exception:
+            pass
+        self._cid_scroll = self.canvas.mpl_connect('scroll_event', self._on_scroll)
+        self._cid_press = self.canvas.mpl_connect('button_press_event', self._on_mouse_press)
+        self._cid_release = self.canvas.mpl_connect('button_release_event', self._on_mouse_release)
+        self._cid_motion = self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
+
+    def _apply_persisted_view(self):
+        if self._persist_xlim is not None and self._persist_ylim is not None:
+            try:
+                self.ax.set_xlim(self._persist_xlim)
+                self.ax.set_ylim(self._persist_ylim)
+            except Exception:
+                pass
+
+    def _update_persisted_view(self):
+        try:
+            self._persist_xlim = tuple(self.ax.get_xlim())
+            self._persist_ylim = tuple(self.ax.get_ylim())
+        except Exception:
+            pass
+
+    def _data_bounds_from_xy(self, x, y):
+        try:
+            import numpy as _np
+            xmin = float(_np.nanmin(x))
+            xmax = float(_np.nanmax(x))
+            ymin = float(_np.nanmin(y))
+            ymax = float(_np.nanmax(y))
+            if xmin == xmax:
+                xmin -= 1.0; xmax += 1.0
+            if ymin == ymax:
+                ymin -= 1.0; ymax += 1.0
+            return (xmin, xmax, ymin, ymax)
+        except Exception:
+            return None
+
+    def _reset_view_to_data(self):
+        b = self._current_data or {}
+        if b.get('type') == 'line':
+            bounds = self._data_bounds_from_xy(b.get('x'), b.get('y'))
+        elif b.get('type') == 'fitting':
+            bounds = self._data_bounds_from_xy(b.get('x'), b.get('y_pred'))
+        elif b.get('type') == 'multi':
+            # multi: 存的是列表
+            all_x = []
+            all_y = []
+            for _, (xv, yv) in (b.get('series') or {}).items():
+                all_x.extend(list(xv))
+                all_y.extend(list(yv))
+            bounds = self._data_bounds_from_xy(np.array(all_x), np.array(all_y))
+        else:
+            bounds = None
+        if bounds:
+            (xmin, xmax, ymin, ymax) = bounds
+            self.ax.set_xlim(xmin, xmax)
+            self.ax.set_ylim(ymin, ymax)
+            self.canvas.draw_idle()
+            self._user_changed_view = False
+            self._update_persisted_view()
+
+    def _on_scroll(self, event):
+        if event.inaxes != self.ax:
+            return
+        # 缩放中心：鼠标位置
+        xdata, ydata = event.xdata, event.ydata
+        cur_xlim = list(self.ax.get_xlim())
+        cur_ylim = list(self.ax.get_ylim())
+        scale = 1.2 if event.button == 'up' else (1/1.2)
+        # X轴
+        left = xdata - (xdata - cur_xlim[0]) * scale
+        right = xdata + (cur_xlim[1] - xdata) * scale
+        # Y轴
+        bottom = ydata - (ydata - cur_ylim[0]) * scale
+        top = ydata + (cur_ylim[1] - ydata) * scale
+        try:
+            self.ax.set_xlim(left, right)
+            self.ax.set_ylim(bottom, top)
+        except Exception:
+            return
+        self.canvas.draw_idle()
+        self._user_changed_view = True
+        self._update_persisted_view()
+
+    def _on_mouse_press(self, event):
+        # 右键拖拽平移；左键双击复位
+        if event.inaxes != self.ax:
+            return
+        if getattr(event, 'dblclick', False) and event.button == 1:
+            self._reset_view_to_data()
+            return
+        if event.button == 3:
+            self._is_panning = True
+            self._pan_start = (event.xdata, event.ydata)
+            self._pan_orig_xlim = self.ax.get_xlim()
+            self._pan_orig_ylim = self.ax.get_ylim()
+
+    def _on_mouse_release(self, event):
+        if event.button == 3:
+            self._is_panning = False
+            self._pan_start = None
+            self._pan_orig_xlim = None
+            self._pan_orig_ylim = None
+
+    def _on_mouse_move(self, event):
+        if not self._is_panning or event.inaxes != self.ax or self._pan_start is None:
+            return
+        x0, y0 = self._pan_start
+        dx = event.xdata - x0 if event.xdata is not None else 0
+        dy = event.ydata - y0 if event.ydata is not None else 0
+        try:
+            self.ax.set_xlim(self._pan_orig_xlim[0] - dx, self._pan_orig_xlim[1] - dx)
+            self.ax.set_ylim(self._pan_orig_ylim[0] - dy, self._pan_orig_ylim[1] - dy)
+        except Exception:
+            return
+        self.canvas.draw_idle()
+        self._user_changed_view = True
+        self._update_persisted_view()
     
     def plot_line(self, x_data, y_data, label='Data', color='#1a73e8', 
                   linewidth=2, marker='o', markersize=4, linestyle='-', **kwargs):
@@ -184,6 +319,8 @@ class CanvasWidget(QWidget):
             print(f"[CanvasWidget] tight_layout警告: {e}")
         
         # 使用draw_idle()在事件循环空闲时重绘（更安全）
+        if self._user_changed_view and self._persist_xlim and self._persist_ylim:
+            self._apply_persisted_view()
         self.canvas.draw_idle()
         self.canvas.flush_events()  # 刷新事件队列
         
@@ -194,6 +331,7 @@ class CanvasWidget(QWidget):
             'y': y_data,
             'label': label
         }
+        self._update_persisted_view()
         
         self.plot_updated.emit()
         print(f"[CanvasWidget] ✅ plot_line完成，使用draw_idle()")
@@ -245,6 +383,8 @@ class CanvasWidget(QWidget):
             print(f"[CanvasWidget] tight_layout警告: {e}")
         
         # 使用draw_idle()在事件循环空闲时重绘
+        if self._user_changed_view and self._persist_xlim and self._persist_ylim:
+            self._apply_persisted_view()
         self.canvas.draw_idle()
         self.canvas.flush_events()
         
@@ -255,6 +395,7 @@ class CanvasWidget(QWidget):
             'y': y_data,
             'y_pred': y_pred
         }
+        self._update_persisted_view()
         
         print(f"[CanvasWidget] ✅ plot_fitting完成，使用draw_idle()")
         
@@ -295,10 +436,17 @@ class CanvasWidget(QWidget):
             self.figure.tight_layout()
         except Exception as e:
             print(f"[CanvasWidget] tight_layout警告: {e}")
-        
+        if self._user_changed_view and self._persist_xlim and self._persist_ylim:
+            self._apply_persisted_view()
         self.canvas.draw_idle()
         self.canvas.flush_events()
         
+        # 保存数据以便复位
+        self._current_data = {
+            'type': 'multi',
+            'series': data_dict
+        }
+        self._update_persisted_view()
         print(f"[CanvasWidget] ✅ plot_multi_curves完成，使用draw_idle()")
         self.plot_updated.emit()
     

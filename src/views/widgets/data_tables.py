@@ -99,7 +99,9 @@ class DataTableWidget(BaseTableWidget):
         参数:
             data: DataFrame 或 JSON字典，包含数据
         """
-        self.setRowCount(0)  # 清空现有数据
+        # 彻底清空现有数据与表头，以适配不同形态的数据（点表/宽表）
+        self.setRowCount(0)
+        self.setColumnCount(0)
         
         # 支持两种输入格式
         if isinstance(data, dict):
@@ -210,17 +212,39 @@ class DataTableWidget(BaseTableWidget):
         if data.empty:
             return
         
-        # 设置行数
+        cols = list(data.columns)
+        # 宽表模式：Time + 若干浓度列
+        is_wide = ('Time' in cols and len(cols) >= 2 and not ({'XValue','YValue'} <= set(cols)))
+        if is_wide:
+            # 动态设置列
+            headers = [str(c) for c in cols]
+            self.setColumnCount(len(headers))
+            self.setHorizontalHeaderLabels(headers)
+            # 填充
+            self.setRowCount(len(data))
+            for row_idx, (_, row) in enumerate(data.iterrows()):
+                for col_idx, col_name in enumerate(cols):
+                    val = row[col_name]
+                    if pd.isna(val):
+                        txt = 'NaN'
+                    else:
+                        if col_name == 'Time' and isinstance(val, (int, float)):
+                            txt = f"{float(val):.3f}"
+                        elif isinstance(val, (int, float)):
+                            txt = f"{float(val):.6f}"
+                        else:
+                            txt = str(val)
+                    self.setItem(row_idx, col_idx, self._create_item(txt))
+            return
+        
+        # 旧式点表（ID/Time/XValue/YValue/YPrediction）
+        # 需要恢复固定表头
+        self._setup_columns()
         row_count = len(data)
         self.setRowCount(row_count)
-        
-        # 填充数据
         for row_idx, (_, row) in enumerate(data.iterrows()):
-            # ID
             if 'ID' in row:
                 self.setItem(row_idx, 0, self._create_item(str(row['ID'])))
-            
-            # Time
             if 'Time' in row:
                 time_val = row['Time']
                 if pd.notna(time_val):
@@ -229,16 +253,10 @@ class DataTableWidget(BaseTableWidget):
                     self.setItem(row_idx, 1, self._create_item('N/A'))
             elif 'XValue' in row:
                 self.setItem(row_idx, 1, self._create_item(f"{row['XValue']:.3f}"))
-            
-            # XValue
             if 'XValue' in row:
                 self.setItem(row_idx, 2, self._create_item(f"{row['XValue']:.6f}"))
-            
-            # YValue
             if 'YValue' in row:
                 self.setItem(row_idx, 3, self._create_item(f"{row['YValue']:.6f}"))
-            
-            # YPrediction
             if 'YPrediction' in row:
                 self.setItem(row_idx, 4, self._create_item(f"{row['YPrediction']:.6f}"))
     
@@ -299,14 +317,39 @@ class ResultTableWidget(BaseTableWidget):
             if isinstance(value_tuple, (list, tuple)):
                 # (value, error, unit) 格式
                 if len(value_tuple) >= 1:
-                    self.setItem(row_idx, 1, self._create_item(f"{value_tuple[0]:.6e}"))
-                if len(value_tuple) >= 2:
-                    self.setItem(row_idx, 2, self._create_item(f"{value_tuple[1]:.6e}"))
+                    val = value_tuple[0]
+                    # 判断类型：字符串直接显示，数值用科学计数法
+                    if isinstance(val, str):
+                        self.setItem(row_idx, 1, self._create_item(val))
+                    elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                        try:
+                            self.setItem(row_idx, 1, self._create_item(f"{val:.6e}"))
+                        except:
+                            self.setItem(row_idx, 1, self._create_item(str(val)))
+                    else:
+                        self.setItem(row_idx, 1, self._create_item(str(val)))
+                if len(value_tuple) >= 2 and value_tuple[1] is not None:
+                    err = value_tuple[1]
+                    if isinstance(err, (int, float)) and not isinstance(err, bool):
+                        try:
+                            self.setItem(row_idx, 2, self._create_item(f"{err:.6e}"))
+                        except:
+                            self.setItem(row_idx, 2, self._create_item(str(err)))
+                    else:
+                        self.setItem(row_idx, 2, self._create_item(str(err)))
                 if len(value_tuple) >= 3:
                     self.setItem(row_idx, 3, self._create_item(str(value_tuple[2])))
             else:
                 # 单个值
-                self.setItem(row_idx, 1, self._create_item(f"{value_tuple:.6e}"))
+                if isinstance(value_tuple, str):
+                    self.setItem(row_idx, 1, self._create_item(value_tuple))
+                elif isinstance(value_tuple, (int, float)) and not isinstance(value_tuple, bool):
+                    try:
+                        self.setItem(row_idx, 1, self._create_item(f"{value_tuple:.6e}"))
+                    except:
+                        self.setItem(row_idx, 1, self._create_item(str(value_tuple)))
+                else:
+                    self.setItem(row_idx, 1, self._create_item(str(value_tuple)))
     
     def _create_item(self, text: str):
         """创建表格项"""

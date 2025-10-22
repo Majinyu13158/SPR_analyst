@@ -5,7 +5,8 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QTextEdit, QSplitter, QWidget,
-    QGroupBox, QFormLayout, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox
+    QGroupBox, QFormLayout, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
+    QAbstractItemView
 )
 from PySide6.QtCore import Qt, Signal
 from typing import Optional, Dict, Any
@@ -21,7 +22,7 @@ class FittingMethodDialog(QDialog):
     
     method_selected = Signal(str, dict)
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, data_manager=None, preselect_data_id=None):
         super().__init__(parent)
         
         self.selected_method: Optional[str] = None
@@ -132,6 +133,8 @@ class FittingMethodDialog(QDialog):
             }
         }
         
+        self.data_manager = data_manager
+        self.preselect_data_id = preselect_data_id
         self._setup_ui()
     
     def _setup_ui(self):
@@ -217,6 +220,16 @@ class FittingMethodDialog(QDialog):
         splitter.setSizes([300, 600])
         layout.addWidget(splitter)
         
+        # ========== 数据源选择（多选） ==========
+        source_group = QGroupBox("数据源选择（可多选，LocalBivariate将合并所选数据列）")
+        source_layout = QVBoxLayout(source_group)
+        self.data_list = QListWidget()
+        self.data_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._populate_data_sources()
+        self.data_list.itemChanged.connect(self._on_data_selection_changed)
+        source_layout.addWidget(self.data_list)
+        layout.addWidget(source_group)
+
         # ========== 按钮 ==========
         button_layout = QHBoxLayout()
         button_layout.addStretch()
@@ -253,6 +266,45 @@ class FittingMethodDialog(QDialog):
         # 默认选中第一个方法
         if self.method_list.count() > 0:
             self.method_list.setCurrentRow(0)
+        self._update_ok_enabled()
+
+    def _populate_data_sources(self):
+        self.data_list.clear()
+        self._data_id_list = []
+        if self.data_manager is None:
+            item = QListWidgetItem("<无可用数据>")
+            item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+            self.data_list.addItem(item)
+            return
+        try:
+            for data_id, data in self.data_manager._data_dict.items():
+                try:
+                    name = getattr(data, 'name', f'Data {data_id}')
+                    df = getattr(data, 'dataframe', None)
+                    shape_str = f"{df.shape}" if df is not None and hasattr(df, 'shape') else "(empty)"
+                    item = QListWidgetItem(f"[{data_id}] {name}  {shape_str}")
+                    item.setData(Qt.UserRole, data_id)
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    # 预选中当前数据
+                    if self.preselect_data_id is not None and data_id == self.preselect_data_id:
+                        item.setCheckState(Qt.Checked)
+                    else:
+                        item.setCheckState(Qt.Unchecked)
+                    self.data_list.addItem(item)
+                    self._data_id_list.append(data_id)
+                except Exception:
+                    continue
+        except Exception:
+            item = QListWidgetItem("<数据加载失败>")
+            item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+            self.data_list.addItem(item)
+
+    def _on_data_selection_changed(self, item):
+        self._update_ok_enabled()
+
+    def _update_ok_enabled(self):
+        has_selected = any(self.data_list.item(i).checkState() == Qt.Checked for i in range(self.data_list.count()))
+        self.ok_btn.setEnabled(bool(self.selected_method) and has_selected)
     
     def _on_method_changed(self, current, previous):
         """处理方法选择变化"""
@@ -265,7 +317,7 @@ class FittingMethodDialog(QDialog):
         # 获取选中的方法
         method_id = current.data(Qt.UserRole)
         self.selected_method = method_id
-        self.ok_btn.setEnabled(True)
+        self._update_ok_enabled()
         
         # 显示方法说明
         method_info = self.fitting_methods[method_id]
@@ -350,10 +402,18 @@ class FittingMethodDialog(QDialog):
         
         return params
 
+    def get_selected_data_ids(self):
+        ids = []
+        for i in range(self.data_list.count()):
+            item = self.data_list.item(i)
+            if item.checkState() == Qt.Checked:
+                ids.append(item.data(Qt.UserRole))
+        return ids
+
 
 # ========== 便利函数 ==========
 
-def select_fitting_method(parent=None) -> tuple[Optional[str], Dict[str, Any]]:
+def select_fitting_method(parent=None, data_manager=None, preselect_data_id=None) -> tuple[Optional[str], Dict[str, Any], list]:
     """
     显示拟合方法选择对话框（便利函数）
     
@@ -363,9 +423,9 @@ def select_fitting_method(parent=None) -> tuple[Optional[str], Dict[str, Any]]:
     返回:
         (method, parameters)，如果取消则返回(None, {})
     """
-    dialog = FittingMethodDialog(parent)
+    dialog = FittingMethodDialog(parent, data_manager=data_manager, preselect_data_id=preselect_data_id)
     if dialog.exec() == QDialog.Accepted:
-        return dialog.get_selected_method(), dialog.get_parameters()
+        return dialog.get_selected_method(), dialog.get_parameters(), dialog.get_selected_data_ids()
     
-    return None, {}
+    return None, {}, []
 

@@ -51,6 +51,11 @@ class MainControllerFull(QObject):
         
         # 初始化
         self._initialize()
+        # 让View能在关闭时回调控制器
+        try:
+            self.view.controller = self
+        except Exception:
+            pass
     
     def _connect_signals(self):
         """连接信号槽"""
@@ -89,6 +94,34 @@ class MainControllerFull(QObject):
         self.view.clear_action.triggered.connect(self.on_clear_all)
         self.view.export_graph_action.triggered.connect(self.on_export_graph)
         self.view.test_guide_action.triggered.connect(self.on_show_test_guide)
+        if hasattr(self.view, 'auto_save_toggle_action'):
+            self.view.auto_save_toggle_action.setChecked(self.session_manager.auto_save_enabled)
+            self.view.auto_save_toggle_action.triggered.connect(self._on_toggle_auto_save)
+        if hasattr(self.view, 'auto_save_interval_action'):
+            self.view.auto_save_interval_action.triggered.connect(self._on_set_auto_save_interval)
+        # 文件菜单/工具栏：新建/导入数据/打开会话/保存
+        if hasattr(self.view, 'menu_new_action'):
+            self.view.menu_new_action.triggered.connect(self._on_menu_new)
+        if hasattr(self.view, 'menu_import_data_action'):
+            self.view.menu_import_data_action.triggered.connect(self._on_menu_import_data)
+        if hasattr(self.view, 'menu_open_session_action'):
+            self.view.menu_open_session_action.triggered.connect(self._on_menu_open)
+        if hasattr(self.view, 'menu_save_action'):
+            self.view.menu_save_action.triggered.connect(self._on_menu_save)
+        if hasattr(self.view, 'menu_save_as_action'):
+            self.view.menu_save_as_action.triggered.connect(self._on_menu_save_as)
+        if hasattr(self.view, 'recent_menu'):
+            self._init_recent_menu()
+        if hasattr(self.view, 'menu_rename_session_action'):
+            self.view.menu_rename_session_action.triggered.connect(self._on_rename_session)
+        if hasattr(self.view, 'toolbar_import_action'):
+            self.view.toolbar_import_action.triggered.connect(self._on_menu_import_data)
+        if hasattr(self.view, 'toolbar_open_session_action'):
+            self.view.toolbar_open_session_action.triggered.connect(self._on_menu_open)
+        if hasattr(self.view, 'toolbar_save_action'):
+            self.view.toolbar_save_action.triggered.connect(self._on_menu_save)
+        if hasattr(self.view, 'toolbar_save_as_action'):
+            self.view.toolbar_save_as_action.triggered.connect(self._on_menu_save_as)
         # 分析菜单/工具栏的“开始拟合”接入当前数据（默认LocalBivariate）
         if hasattr(self.view, 'fit_action'):
             self.view.fit_action.triggered.connect(self._on_fit_from_menu)
@@ -155,92 +188,45 @@ class MainControllerFull(QObject):
                 self.view.show_error("DataFrame转换失败", error)
                 self.view.update_status("加载失败")
                 return
+            # ⭐ 新增：将JSON解析得到的宽表导出为Excel并自动导入
+            try:
+                import os
+                import pandas as pd
+                base_name = os.path.splitext(file_name)[0]
+                export_dir = os.path.join(os.getcwd(), 'Json2excel')
+                os.makedirs(export_dir, exist_ok=True)
+                export_path = os.path.join(export_dir, f"{base_name}.xlsx")
+                # 仅在是宽表(Time+多列)时导出；否则仍导出以统一流程
+                df_to_save = df.copy()
+                df_to_save.to_excel(export_path, index=False)
+                print(f"[Controller] ✅ 已将JSON转换为Excel: {export_path} (shape={df_to_save.shape})")
+                # 作为父宽表节点导入（仅一次），并让 on_data_added 负责生成子节点
+                excel_display_name = f"{base_name} (宽表)"
+                df_to_save.attrs['wide_parent_children_cols'] = [str(c) for c in list(df_to_save.columns)[1:]]
+                df_to_save.attrs['wide_parent_base_name'] = base_name
+                excel_parent_id = self.data_manager.add_data(excel_display_name, df_to_save)
+                # 链接：json file → data(excel父)
+                self.link_manager.create_link(
+                    'file', file_path,
+                    'data', excel_parent_id,
+                    link_type='json_to_excel',
+                    metadata={
+                        'generated_excel_path': export_path,
+                        'note': 'JSON解析生成的宽表Excel'
+                    }
+                )
+                # 项目挂载
+                project = self.project_manager.get_current_project()
+                if project:
+                    project.add_data(excel_parent_id)
+                # 显示父节点数据到表格
+                self.view.data_table.load_data(df_to_save)
+                print(f"[Controller] 已导入宽表父节点: data_id={excel_parent_id}，子节点由on_data_added创建")
+            except Exception as e:
+                print(f"[Controller] ⚠️ JSON→Excel转换失败: {e}")
             
-            # 4. ⭐ 需求1：为每个样本创建独立的Data对象（带分组）
+            # 4. 不再创建“JSON直读”的多样本节点结构；仅保留“Excel父+子”结构
             data_ids = []
-            group_item = None  # 用于存储组节点
-            
-            if 'CalculateDataList' in json_data and len(json_data['CalculateDataList']) > 0:
-                calc_list = json_data['CalculateDataList']
-                
-                if len(calc_list) == 1:
-                    # 单样本：直接使用完整DataFrame，不创建分组
-                    data_id = self.data_manager.add_data(display_name, df)
-                    data_ids.append(data_id)
-                    
-                    # 创建链接
-                    self.link_manager.create_link(
-                        'file', file_path,
-                        'data', data_id,
-                        link_type='import',
-                        metadata={
-                            'file_name': file_name,
-                            'import_time': datetime.now().isoformat(),
-                            'file_size': os.path.getsize(file_path) if os.path.exists(file_path) else None
-                        }
-                    )
-                    
-                    print(f"[Controller] 单样本模式：创建1个Data对象")
-                else:
-                    # ⭐ 多样本：创建分组结构
-                    print(f"[Controller] ⭐ 多样本模式：发现{len(calc_list)}个样本")
-                    
-                    # 创建组节点（文件名作为组名）
-                    group_name = os.path.splitext(file_name)[0]  # 去掉扩展名
-                    group_item = self.view.project_tree.add_data_group(f"{group_name} ({len(calc_list)}个样本)")
-                    print(f"[Controller] 创建数据组: {group_name}")
-                    
-                    # 为每个样本创建子节点
-                    for i, sample in enumerate(calc_list):
-                        sample_name = sample.get('SampleName', f'样本{i+1}')
-                        sample_conc = sample.get('Concentration', 0.0)
-                        sample_unit = sample.get('ConcentrationUnit', 'M')
-                        
-                        # 提取该样本的数据
-                        sample_data = []
-                        if 'BaseData' in sample:
-                            sample_data.extend(sample['BaseData'])
-                        if 'CombineData' in sample:
-                            sample_data.extend(sample['CombineData'])
-                        if 'DissociationData' in sample:
-                            sample_data.extend(sample['DissociationData'])
-                        
-                        if sample_data:
-                            # 转换为DataFrame
-                            sample_df = pd.DataFrame(sample_data)
-                            sample_df.attrs['sample_name'] = sample_name
-                            sample_df.attrs['concentration'] = sample_conc
-                            sample_df.attrs['concentration_unit'] = sample_unit
-                            sample_df.attrs['sample_index'] = i
-                            sample_df.attrs['group_name'] = group_name  # 保存组名
-                            
-                            # 添加到数据管理器
-                            sample_data_id = self.data_manager.add_data(sample_name, sample_df)
-                            data_ids.append(sample_data_id)
-                            
-                            # ⭐ 添加为组的子节点
-                            self.view.project_tree.add_data_item(sample_data_id, sample_name, parent_item=group_item)
-                            
-                            # 创建链接
-                            self.link_manager.create_link(
-                                'file', file_path,
-                                'data', sample_data_id,
-                                link_type='import',
-                                metadata={
-                                    'file_name': file_name,
-                                    'group_name': group_name,
-                                    'sample_index': i,
-                                    'sample_name': sample_name,
-                                    'concentration': f"{sample_conc} {sample_unit}",
-                                    'import_time': datetime.now().isoformat()
-                                }
-                            )
-                            
-                            print(f"[Controller]   - 样本{i+1}: {sample_name} ({len(sample_data)}行, 浓度={sample_conc}{sample_unit})")
-            else:
-                # 兜底：使用完整DataFrame
-                data_id = self.data_manager.add_data(display_name, df)
-                data_ids.append(data_id)
             
             # 6. 添加到当前项目
             project = self.project_manager.get_current_project()
@@ -248,8 +234,7 @@ class MainControllerFull(QObject):
                 for data_id in data_ids:
                     project.add_data(data_id)
             
-            # 7. ⭐ 关键：使用原始JSON字典填充表格（参考原项目）
-            self.view.data_table.load_data(json_data)
+            # 7. 显示父宽表（上面已显示），此处不再覆盖为原始JSON点表
             
             # 8. 统计信息
             total_rows = 0
@@ -289,52 +274,42 @@ class MainControllerFull(QObject):
                 self.view.update_status("加载失败")
                 return
             
-            # 获取显示名称
+            # ========= 宽表Excel：创建父+子节点结构（不保留单独总节点） =========
+            try:
+                import pandas as pd
+                cols = list(df.columns)
+                is_wide = ('Time' in cols and len(cols) >= 2)
+                display_name = os.path.splitext(file_name)[0]
+                if is_wide:
+                    # 将子列信息写入attrs，交给on_data_added统一创建父/子节点，避免重复
+                    df.attrs['wide_parent_children_cols'] = [str(c) for c in cols[1:]]
+                    df.attrs['wide_parent_base_name'] = display_name
+                    parent_id = self.data_manager.add_data(f"{display_name} (宽表)", df)
+                    self.link_manager.create_link('file', file_path, 'data', parent_id, link_type='import', metadata={'file_name': file_name})
+                    project = self.project_manager.get_current_project()
+                    if project:
+                        project.add_data(parent_id)
+                    # 显示父表
+                    self.view.data_table.load_data(df)
+                    self.view.update_status(f"已加载: {display_name} (宽表)")
+                    print(f"[Controller] Excel宽表导入完成，父节点已创建: parent={parent_id}（子节点由on_data_added负责）")
+                    return
+            except Exception as e:
+                print(f"[Controller] 宽表Excel节点构建失败，退回单节点: {e}")
+
+            # ========= 退回单节点导入 =========
             display_name = file_name
             if hasattr(df, 'attrs') and 'sample_name' in df.attrs:
                 sample_name = df.attrs['sample_name']
                 if sample_name:
                     display_name = sample_name
-            
-            # 添加到数据管理器
             data_id = self.data_manager.add_data(display_name, df)
-            
-            # 创建链接
-            self.link_manager.create_link(
-                'file', file_path,
-                'data', data_id,
-                link_type='import',
-                metadata={
-                    'file_name': file_name,
-                    'import_time': datetime.now().isoformat(),
-                    'file_size': os.path.getsize(file_path) if os.path.exists(file_path) else None
-                }
-            )
-            
-            # 添加到当前项目
+            self.link_manager.create_link('file', file_path, 'data', data_id, link_type='import', metadata={'file_name': file_name})
             project = self.project_manager.get_current_project()
             if project:
                 project.add_data(data_id)
-            
-            # 显示数据（DataFrame方式）
             self.view.data_table.load_data(df)
-            
             self.view.update_status(f"已加载: {display_name}")
-            
-            info = f"文件: {file_name}\n"
-            info += f"数据名称: {display_name}\n"
-            info += f"数据行数: {len(df)}\n"
-            info += f"数据列: {', '.join(df.columns.tolist())}"
-            
-            if hasattr(df, 'attrs'):
-                if 'concentration' in df.attrs:
-                    info += f"\n浓度: {df.attrs['concentration']}"
-                if 'concentration_unit' in df.attrs:
-                    info += f" {df.attrs['concentration_unit']}"
-            
-            # ✅ 不弹窗，改为状态栏关键信息
-            self.view.update_status(info.replace('\n', ' | '))
-            
             print(f"[Controller] 文件导入完成，已创建链接: file:{file_path} → data:{data_id}")
     
     @Slot(str, str)
@@ -379,19 +354,66 @@ class MainControllerFull(QObject):
         节点添加时机：
         1. 手动点击"新建"：dataframe为空 → 添加到树
         2. 单样本JSON：dataframe不为空 → 添加到树
-        3. 多样本JSON：有group_name属性 → 已在on_file_selected中添加，跳过
+        3. 宽表父节点：由此创建子节点（split_sample），避免重复创建
         """
         data = self.data_manager.get_data(data_id)
         if not data:
             return
         
-        # 情况3：多样本JSON，已经通过group_item添加
-        if (data.dataframe is not None and 
-            not data.dataframe.empty and 
-            hasattr(data.dataframe, 'attrs') and 
-            'group_name' in data.dataframe.attrs):
-            print(f"[Controller] 多样本数据已添加到组中，跳过: {data.name}")
-            return
+        # 若这是一个宽表父节点且还未生成子节点，则在此生成
+        if (data.dataframe is not None and not data.dataframe.empty and hasattr(data.dataframe, 'attrs')):
+            attrs = data.dataframe.attrs
+            if 'wide_parent_children_cols' in attrs and 'wide_parent_base_name' in attrs:
+                try:
+                    import pandas as pd
+                    base_name = attrs['wide_parent_base_name']
+                    cols = list(attrs['wide_parent_children_cols'])
+                    time_vals = data.dataframe['Time'].values
+                    # 在树上创建父节点（若还未创建）
+                    parent_item = self.view.project_tree.add_data_item(data_id, data.name)
+                    for col in cols:
+                        sub_df = pd.DataFrame({'XValue': pd.to_numeric(time_vals, errors='coerce'),
+                                               'YValue': pd.to_numeric(data.dataframe[str(col)].values, errors='coerce')})
+                        child_name = f"{base_name} - {str(col)}"
+                        child_id = self.data_manager.add_data(child_name, sub_df)
+                        # 父→子链接
+                        self.link_manager.create_link('data', data_id, 'data', child_id, link_type='split_sample', metadata={'column': str(col)})
+                        self.view.project_tree.add_data_item(child_id, child_name, parent_item=parent_item)
+                        # 为每个新子节点自动创建并显示一幅图像（单曲线）
+                        try:
+                            figure_id = self.figure_manager.add_figure(f"{child_name} - 数据图", "line")
+                            figure = self.figure_manager.get_figure(figure_id)
+                            figure.add_data_source(child_id, {
+                                'label': child_name,
+                                'color': '#1a73e8',
+                                'linewidth': 2.0,
+                                'marker': 'o',
+                                'markersize': 3.0
+                            })
+                            self.link_manager.create_link('data', child_id, 'figure', figure_id, link_type='visualize')
+                        except Exception:
+                            pass
+                    # 避免重复生成
+                    del attrs['wide_parent_children_cols']
+                    del attrs['wide_parent_base_name']
+                    print(f"[Controller] 已为宽表父节点生成子节点: parent={data_id}")
+                    # 同时为父节点创建一张多曲线图
+                    try:
+                        parent_figure_id = self.figure_manager.add_figure(f"{data.name} - 多曲线", "line")
+                        fig = self.figure_manager.get_figure(parent_figure_id)
+                        fig.add_data_source(data_id, {
+                            'label': data.name,
+                            'color': '#1a73e8',
+                            'linewidth': 2.0,
+                            'marker': 'none'
+                        })
+                        self.link_manager.create_link('data', data_id, 'figure', parent_figure_id, link_type='visualize')
+                        self.on_figure_selected(parent_figure_id)
+                    except Exception:
+                        pass
+                    return
+                except Exception as e:
+                    print(f"[Controller] 生成子节点失败: {e}")
         
         # 情况1和2：添加到树
         self.view.add_data_to_tree(data_id, data.name)
@@ -543,11 +565,58 @@ class MainControllerFull(QObject):
         self.view.update_status(f"正在拟合: {method}")
         
         try:
-            # 获取X, Y数据
-            x_data, y_data = data.get_xy_data()
+            # ===== ⭐ 新增：拟合前数据验证 =====
+            validation = data.validate_xy_extraction()
             
-            # ⭐ 执行拟合（传递DataFrame用于某些需要完整数据的算法）
-            fit_result = fit_data(method, x_data, y_data, dataframe=data.dataframe)
+            # 检查是否有严重错误
+            if 'error' in validation:
+                self.view.show_error("数据验证失败", validation['error'])
+                self.view.update_status("拟合失败：数据无效")
+                return
+            
+            # 显示警告信息（如果有）
+            if validation['warnings']:
+                warning_msg = "数据验证警告：\n\n"
+                warning_msg += "\n".join(f"• {w}" for w in validation['warnings'])
+                warning_msg += f"\n\n将使用列：\n"
+                warning_msg += f"• X列: {validation['x_col']}\n"
+                warning_msg += f"• Y列: {validation['y_col']}\n"
+                warning_msg += f"• 有效数据点: {validation['valid_both']} / {validation['total_points']}\n"
+                
+                if validation['y_candidates'] and len(validation['y_candidates']) > 1:
+                    warning_msg += f"\n备选Y列: {', '.join(validation['y_candidates'])}\n"
+                
+                warning_msg += "\n是否继续拟合？"
+                
+                # 如果数据点<3，强制阻止拟合
+                if validation['valid_both'] < 3:
+                    self.view.show_error("数据不足", warning_msg.replace("是否继续拟合？", "拟合已取消"))
+                    self.view.update_status("拟合失败：数据点不足")
+                    return
+                
+                # 其他警告：询问用户
+                from PySide6.QtWidgets import QMessageBox
+                reply = QMessageBox.warning(
+                    self.view,
+                    "数据验证警告",
+                    warning_msg,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No  # 默认为No
+                )
+                
+                if reply != QMessageBox.Yes:
+                    self.view.update_status("用户取消拟合")
+                    return
+            
+            # 获取X, Y数据
+            # ⚠️ 注意：拟合时使用 auto_sort=False 保持原始顺序
+            # 某些算法可能依赖于数据的原始时间顺序
+            x_data, y_data = data.get_xy_data(auto_sort=False)
+            
+            print(f"[Controller] 拟合数据: X列={validation['x_col']}, Y列={validation['y_col']}, 数据点={len(x_data)}")
+            
+            # ⭐ 执行拟合（传递DataFrame和Data对象用于获取SPR参数）
+            fit_result = fit_data(method, x_data, y_data, dataframe=data.dataframe, data_obj=data)
             
             if not fit_result['success']:
                 self.view.show_error("拟合失败", fit_result.get('error', '未知错误'))
@@ -560,7 +629,18 @@ class MainControllerFull(QObject):
                 method
             )
             result = self.result_manager.get_result(result_id)
-            result.set_parameters(fit_result['parameters'])
+            # 附加元信息：数据源与方法
+            params_with_meta = dict(fit_result['parameters']) if isinstance(fit_result.get('parameters'), dict) else {}
+            try:
+                data_source_name = data.get_name() if hasattr(data, 'get_name') else getattr(data, 'name', str(data_id))
+            except Exception:
+                data_source_name = str(data_id)
+            params_with_meta = {
+                'DataSource': (data_source_name, None, ''),
+                'Method': (method, None, ''),
+                **params_with_meta
+            }
+            result.set_parameters(params_with_meta)
             result.set_statistics(rmse=fit_result['statistics'].get('rmse'))
             result.set_data_source(data_id)  # 使用新方法设置数据源
             
@@ -582,14 +662,47 @@ class MainControllerFull(QObject):
             if fit_result.get('y_pred') is not None:
                 # 创建拟合曲线Data对象
                 import pandas as pd
-                fitted_df = pd.DataFrame({
-                    'XValue': x_data,
-                    'YValue': fit_result['y_pred']
-                })
+                y_pred = fit_result['y_pred']
+                
+                # ⭐ 调试：验证拟合结果
+                print(f"[Controller] 拟合结果验证:")
+                print(f"  - X数据（前5个）: {x_data[:5]}")
+                print(f"  - Y原始（前5个）: {y_data[:5]}")
+                print(f"  - Y预测（前5个）: {y_pred[:5]}")
+                
+                # 检查是否Y预测等于X（这会导致直线）
+                if len(y_pred) == len(x_data):
+                    is_y_equal_x = all(abs(y_pred[i] - x_data[i]) < 1e-10 for i in range(min(5, len(x_data))))
+                    if is_y_equal_x:
+                        print(f"[Controller] ⚠️ 警告：Y预测值等于X值！这会画成直线！")
+                
+                # 如果返回了矩阵形式的预测以及时间向量，则生成“宽表拟合曲线”
+                if isinstance(y_pred, (list, tuple)) or hasattr(y_pred, 'ndim'):
+                    y_pred_matrix = fit_result.get('y_pred_matrix')
+                    time_vector = fit_result.get('time_vector')
+                    headers = fit_result.get('headers')
+                else:
+                    y_pred_matrix, time_vector, headers = None, None, None
+
+                if y_pred_matrix is not None and hasattr(y_pred_matrix, 'ndim') and y_pred_matrix.ndim == 2 and time_vector is not None and headers is not None:
+                    # 将矩阵预测写成宽表：Time | conc1 | conc2 | ...
+                    try:
+                        data_dict = {'Time': time_vector}
+                        for idx, col_name in enumerate(headers):
+                            data_dict[str(col_name)] = y_pred_matrix[:, idx]
+                        fitted_df = pd.DataFrame(data_dict)
+                    except Exception:
+                        # 退化到一维曲线
+                        fitted_df = pd.DataFrame({'XValue': x_data, 'YValue': y_pred})
+                else:
+                    fitted_df = pd.DataFrame({'XValue': x_data, 'YValue': y_pred})
                 fitted_df.attrs['source_type'] = 'fitted_curve'
                 fitted_df.attrs['result_id'] = result_id
                 fitted_df.attrs['original_data_id'] = data_id
                 fitted_df.attrs['method'] = method
+                
+                print(f"[Controller] 拟合曲线DataFrame:")
+                print(fitted_df.head())
                 
                 fitted_data_id = self.data_manager.add_data(
                     name=f"{data.name} - 拟合曲线({method})",
@@ -696,6 +809,100 @@ class MainControllerFull(QObject):
             import traceback
             traceback.print_exc()
     
+    def on_fitting_requested_multi(self, data_ids: list, method: str):
+        """
+        合并多个数据后进行拟合（LocalBivariate多浓度支持）
+        
+        参数:
+            data_ids: 数据ID列表
+            method: 拟合方法
+        """
+        import pandas as pd
+        import numpy as np
+        
+        if not data_ids:
+            self.view.show_error("拟合失败", "未选择任何数据")
+            return
+        
+        print(f"[Controller] 合并拟合: 数据ID={data_ids}, 方法={method}")
+        
+        try:
+            # ========== 步骤1：收集所有数据的DataFrame ==========
+            all_dataframes = []
+            data_names = []
+            
+            for data_id in data_ids:
+                data = self.data_manager.get_data(data_id)
+                if not data or data.dataframe is None or data.dataframe.empty:
+                    print(f"[Controller] 跳过空数据: data_id={data_id}")
+                    continue
+                all_dataframes.append(data.dataframe.copy())
+                data_names.append(data.get_name() if hasattr(data, 'get_name') else str(data_id))
+            
+            if not all_dataframes:
+                self.view.show_error("拟合失败", "所有选中的数据都为空")
+                return
+            
+            # ========== 步骤2：合并为宽表 ==========
+            print(f"[Controller] 合并{len(all_dataframes)}个DataFrame...")
+            
+            # 检查是否都已经是宽表格式（Time + 浓度列）
+            merged_df = None
+            time_col = None
+            
+            # 宽表优先：若DataFrame含有Time且≥2列，则直接按浓度列横向追加
+            for idx, df in enumerate(all_dataframes):
+                cols = list(df.columns)
+                if len(cols) < 2:
+                    print(f"[Controller] 数据{idx}列数不足，跳过")
+                    continue
+                if 'Time' in cols:
+                    if idx == 0:
+                        merged_df = df.copy()
+                    else:
+                        for col in cols[1:]:
+                            new_col = str(col)
+                            while merged_df is not None and new_col in merged_df.columns:
+                                new_col = new_col + "_dup"
+                            merged_df[new_col] = df[col].values
+                else:
+                    # 回退：若不是宽表，尝试只取(XValue,YValue)并先转为单列宽表（不推荐）
+                    if idx == 0:
+                        if 'XValue' in cols and 'YValue' in cols:
+                            merged_df = pd.DataFrame({'Time': df['XValue'].values, '0.0': df['YValue'].values})
+                    else:
+                        if 'YValue' in cols:
+                            new_col = f"{idx}"
+                            merged_df[new_col] = df['YValue'].values
+            
+            if merged_df is None or merged_df.empty:
+                self.view.show_error("拟合失败", "数据合并失败")
+                return
+            
+            print(f"[Controller] 合并后的DataFrame形状: {merged_df.shape}")
+            print(f"[Controller] 列名: {list(merged_df.columns)}")
+            
+            # ========== 步骤3：创建临时Data对象 ==========
+            combined_name = f"合并数据({len(data_names)}组): {', '.join(data_names[:3])}" + ("..." if len(data_names) > 3 else "")
+            
+            combined_data_id = self.data_manager.add_data(
+                name=combined_name,
+                dataframe=merged_df
+            )
+            
+            print(f"[Controller] 创建合并数据: data_id={combined_data_id}, name={combined_name}")
+            
+            # ========== 步骤4：调用单次拟合 ==========
+            self.on_fitting_requested(combined_data_id, method)
+            
+            print(f"[Controller] ⭐ 多数据合并拟合完成")
+            
+        except Exception as e:
+            self.view.show_error("合并拟合出错", f"{str(e)}\n\n请确保所有数据格式一致")
+            self.view.update_status("合并拟合失败")
+            import traceback
+            traceback.print_exc()
+    
     # ========== 链接管理槽函数 ==========
     
     @Slot(str, object, str, object)
@@ -728,6 +935,11 @@ class MainControllerFull(QObject):
         # 移除窗口标题的未保存标记
         current_title = self.view.windowTitle().rstrip(' *')
         self.view.setWindowTitle(f"{current_title} - {file_name}")
+        # 清除未保存标记
+        if hasattr(self.view, 'setProperty'):
+            self.view.setProperty('_dirty', False)
+        if hasattr(self.view, 'set_session_name'):
+            self.view.set_session_name(self.session_manager.session_name)
     
     @Slot(str)
     def on_session_loaded(self, file_path: str):
@@ -736,7 +948,48 @@ class MainControllerFull(QObject):
         file_name = os.path.basename(file_path)
         self.view.update_status(f"已加载: {file_name}")
         self.view.setWindowTitle(f"SPR Data Analyst - {file_name}")
-        # TODO: 更新UI显示加载的数据
+        if hasattr(self.view, 'setProperty'):
+            self.view.setProperty('_dirty', False)
+        if hasattr(self.view, 'set_session_name'):
+            self.view.set_session_name(self.session_manager.session_name)
+        # 重建UI：清空树并填充加载的数据/图表/结果
+        try:
+            # 清空树
+            if hasattr(self.view, 'project_tree') and hasattr(self.view.project_tree, 'clear_all'):
+                self.view.project_tree.clear_all()
+
+            # 添加数据
+            first_data_id = None
+            for data_id, data in self.data_manager._data_dict.items():
+                self.view.add_data_to_tree(data_id, data.name)
+                if first_data_id is None:
+                    first_data_id = data_id
+
+            # 添加图表
+            for fig in self.figure_manager.get_all_figures():
+                self.view.add_figure_to_tree(fig.id, fig.name)
+
+            # 添加结果
+            for res in self.result_manager.get_all_results():
+                self.view.add_result_to_tree(res.id, res.name)
+
+            # 显示首个数据到表格并尝试绘图
+            if first_data_id is not None:
+                self.current_data_id = first_data_id
+                data = self.data_manager.get_data(first_data_id)
+                if data and data.dataframe is not None and not data.dataframe.empty:
+                    # 表格
+                    self.view.show_data_table(data.dataframe)
+                    # 尝试绘图（使用已稳定的MiniPlot通道）
+                    try:
+                        x_data, y_data = data.get_xy_data()
+                        self.view.show_plot(x_data, y_data, label=data.name)
+                    except Exception:
+                        pass
+            
+        except Exception as e:
+            # 仅记录日志，不阻塞
+            print(f"[Controller] 重新构建UI失败: {e}")
     
     # ========== 公共方法 ==========
     
@@ -749,19 +1002,25 @@ class MainControllerFull(QObject):
         self.on_fitting_requested(self.current_data_id, method)
 
     def _on_fit_from_menu(self):
-        """菜单/工具栏：开始拟合（弹出方法选择，默认LocalBivariate）"""
-        if self.current_data_id is None:
-            self.view.show_error("操作失败", "请先在左侧选择一个数据节点")
-            return
+        """菜单/工具栏：开始拟合（弹出方法选择，无需预先选中数据）"""
         try:
             from src.views.dialogs import select_fitting_method
-            method, parameters = select_fitting_method(self.view)
+            method, parameters, selected_data_ids = select_fitting_method(self.view, data_manager=self.data_manager, preselect_data_id=self.current_data_id)
             if not method:
+                return
+            # 允许未预先选中任何数据节点
+            if not selected_data_ids:
+                self.view.show_error("操作失败", "请在对话框中至少选择一个数据源")
                 return
         except Exception:
             # 若对话框不存在，使用默认方法
             method = "LocalBivariate"
-        self.on_fitting_requested(self.current_data_id, method)
+            selected_data_ids = [self.current_data_id] if self.current_data_id is not None else []
+        # 多数据合并拟合
+        if len(selected_data_ids) > 1:
+            self.on_fitting_requested_multi(selected_data_ids, method)
+        elif len(selected_data_ids) == 1:
+            self.on_fitting_requested(selected_data_ids[0], method)
     
     def save_session(self, file_path: Optional[str] = None):
         """
@@ -802,6 +1061,129 @@ class MainControllerFull(QObject):
             self.view.show_error("加载失败", "加载会话时发生错误")
         
         return success
+
+    # ========== 菜单动作：打开/保存 ========== 
+    def _on_menu_open(self):
+        from PySide6.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getOpenFileName(
+            self.view,
+            "打开会话文件",
+            "",
+            "SPR 会话文件 (*.sprx);;所有文件 (*.*)"
+        )
+        if file_path:
+            self.load_session(file_path)
+            self._add_recent_file(file_path)
+
+    def _on_menu_import_data(self):
+        from PySide6.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getOpenFileName(
+            self.view,
+            "导入数据文件",
+            "",
+            "数据文件 (*.json *.csv *.xlsx *.xls);;JSON (*.json);;CSV (*.csv);;Excel (*.xlsx *.xls);;所有文件 (*.*)"
+        )
+        if file_path:
+            # 复用现有加载文件流程
+            self.on_file_selected(file_path)
+
+    def _on_menu_save(self):
+        from PySide6.QtWidgets import QFileDialog
+        # 若已有路径，直接保存；否则询问保存为
+        if self.session_manager.current_file_path:
+            self.save_session(self.session_manager.current_file_path)
+            self._add_recent_file(self.session_manager.current_file_path)
+            return
+        file_path, _ = QFileDialog.getSaveFileName(
+            self.view,
+            "保存会话为",
+            "session.sprx",
+            "SPR 会话文件 (*.sprx);;所有文件 (*.*)"
+        )
+        if file_path:
+            self.save_session(file_path)
+            self._add_recent_file(file_path)
+
+    def _on_menu_save_as(self):
+        from PySide6.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getSaveFileName(
+            self.view,
+            "另存为",
+            "session.sprx",
+            "SPR 会话文件 (*.sprx);;所有文件 (*.*)"
+        )
+        if file_path:
+            self.save_session(file_path)
+            self._add_recent_file(file_path)
+
+    def _on_menu_new(self):
+        from PySide6.QtWidgets import QMessageBox
+        if self.session_manager.is_modified:
+            reply = QMessageBox.question(
+                self.view,
+                "未保存的更改",
+                "当前会话有未保存的更改，是否继续新建？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        # 新建会话并清空UI
+        self.session_manager.new_session("新会话")
+        if hasattr(self.view, 'project_tree') and hasattr(self.view.project_tree, 'clear_all'):
+            self.view.project_tree.clear_all()
+        self.view.update_status("已新建会话")
+        self.view.setWindowTitle("SPR Data Analyst - 新会话")
+        if hasattr(self.view, 'set_session_name'):
+            self.view.set_session_name(self.session_manager.session_name)
+
+    # ========== 最近打开 ========== 
+    def _init_recent_menu(self):
+        try:
+            self._recent_files = []
+            self._refresh_recent_menu()
+        except Exception:
+            self._recent_files = []
+
+    def _add_recent_file(self, path: str):
+        if not hasattr(self, '_recent_files'):
+            self._recent_files = []
+        # 放到前面，去重，保留最多8个
+        path = str(path)
+        self._recent_files = [p for p in self._recent_files if p != path]
+        self._recent_files.insert(0, path)
+        self._recent_files = self._recent_files[:8]
+        self._refresh_recent_menu()
+
+    def _refresh_recent_menu(self):
+        if not hasattr(self.view, 'recent_menu'):
+            return
+        menu = self.view.recent_menu
+        menu.clear()
+        if not getattr(self, '_recent_files', None):
+            from PySide6.QtWidgets import QAction
+            act = QAction("（空）", self.view)
+            act.setEnabled(False)
+            menu.addAction(act)
+            return
+        from PySide6.QtWidgets import QAction
+        for p in self._recent_files:
+            act = QAction(p, self.view)
+            act.triggered.connect(lambda checked=False, path=p: self.load_session(path))
+            menu.addAction(act)
+
+    def _on_rename_session(self):
+        from PySide6.QtWidgets import QInputDialog
+        current = self.session_manager.session_name
+        name, ok = QInputDialog.getText(self.view, "重命名会话", "会话名称：", text=current)
+        if ok and name:
+            self.session_manager.session_name = name
+            # 更新标题/状态栏
+            title = self.view.windowTitle().split(' - ')[0]
+            self.view.setWindowTitle(f"{title} - {name}")
+            self.view.update_status(f"会话已重命名为：{name}")
+            if hasattr(self.view, 'set_session_name'):
+                self.view.set_session_name(name)
     
     def new_session(self):
         """创建新会话"""
@@ -814,12 +1196,36 @@ class MainControllerFull(QObject):
         self.view.setWindowTitle("SPR Data Analyst - 新会话")
         self.view.update_status("新建会话")
         # TODO: 清空UI显示
+        if hasattr(self.view, 'setProperty'):
+            self.view.setProperty('_dirty', False)
     
     def print_session_stats(self):
         """打印会话统计信息（调试用）"""
         self.session_manager.print_session_info()
         self.link_manager.print_summary()
         self.link_manager.print_all_links()
+
+    # ========== 自动保存控制 ==========
+    def _on_toggle_auto_save(self, checked: bool):
+        self.session_manager.enable_auto_save(checked, self.session_manager.auto_save_interval)
+        self.view.update_status("自动保存：开启" if checked else "自动保存：关闭")
+
+    def _on_set_auto_save_interval(self):
+        from PySide6.QtWidgets import QInputDialog
+        interval, ok = QInputDialog.getInt(
+            self.view,
+            "设置自动保存间隔",
+            "间隔（秒）：",
+            value=self.session_manager.auto_save_interval,
+            min=30,
+            max=3600,
+            step=30
+        )
+        if ok:
+            self.session_manager.enable_auto_save(True, interval)
+            if hasattr(self.view, 'auto_save_toggle_action'):
+                self.view.auto_save_toggle_action.setChecked(True)
+            self.view.update_status(f"自动保存：间隔已设为 {interval} 秒")
     
     # ========== 右键菜单槽函数 ==========
     
@@ -892,9 +1298,9 @@ class MainControllerFull(QObject):
         """
         print(f"[Controller] 请求拟合数据: data_id={data_id}")
         
-        # 显示拟合方法选择对话框
+        # 显示拟合方法选择对话框（带数据源选择）
         from src.views.dialogs import select_fitting_method
-        method, parameters = select_fitting_method(self.view)
+        method, parameters, selected_data_ids = select_fitting_method(self.view, data_manager=self.data_manager, preselect_data_id=data_id)
         
         if method is None:
             print("[Controller] 用户取消了拟合方法选择")
@@ -902,8 +1308,14 @@ class MainControllerFull(QObject):
         
         print(f"[Controller] 用户选择拟合方法: {method}, 参数: {parameters}")
         
-        # 调用现有的拟合函数
-        self.on_fitting_requested(data_id, method)
+        # 允许多选数据
+        if not selected_data_ids:
+            selected_data_ids = [data_id]
+        
+        if len(selected_data_ids) > 1:
+            self.on_fitting_requested_multi(selected_data_ids, method)
+        else:
+            self.on_fitting_requested(selected_data_ids[0], method)
     
     @Slot(int)
     def on_change_figure_source(self, figure_id: int):
@@ -1103,6 +1515,38 @@ class MainControllerFull(QObject):
         
         # 同时输出到控制台
         self.session_manager.print_session_info()
+
+    # ========== 关闭前保存提示 ==========
+    def try_handle_close(self) -> bool:
+        """处理窗口关闭前的未保存提示，返回是否允许关闭"""
+        from PySide6.QtWidgets import QMessageBox, QFileDialog
+        if not self.session_manager.is_modified:
+            return True
+        reply = QMessageBox.question(
+            self.view,
+            "未保存的更改",
+            "当前会话有未保存的更改。是否保存？",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save
+        )
+        if reply == QMessageBox.Cancel:
+            return False
+        if reply == QMessageBox.Discard:
+            return True
+        # Save
+        path = self.session_manager.current_file_path
+        if not path:
+            file_path, _ = QFileDialog.getSaveFileName(
+                self.view,
+                "保存会话为",
+                "session.sprx",
+                "SPR 会话文件 (*.sprx);;所有文件 (*.*)"
+            )
+            if not file_path:
+                return False
+            path = file_path
+        ok = self.save_session(path)
+        return bool(ok)
     
     @Slot()
     def on_view_links(self):
