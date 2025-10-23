@@ -160,6 +160,28 @@ class MainWindowFull(QMainWindow):
         analysis_menu.addAction(unlock_fit_action)
         self.unlock_fit_action = unlock_fit_action
         
+        # 编辑菜单
+        edit_menu = menubar.addMenu("编辑(&E)")
+        
+        undo_action = QAction("撤销(&U)", self)
+        undo_action.setShortcut("Ctrl+Z")
+        undo_action.setStatusTip("撤销上一步操作")
+        edit_menu.addAction(undo_action)
+        self.undo_action = undo_action
+        
+        redo_action = QAction("重做(&R)", self)
+        redo_action.setShortcut("Ctrl+Y")
+        redo_action.setStatusTip("重做已撤销的操作")
+        edit_menu.addAction(redo_action)
+        self.redo_action = redo_action
+        
+        edit_menu.addSeparator()
+        
+        history_action = QAction("操作历史(&H)...", self)
+        history_action.setStatusTip("查看操作历史和数据血缘")
+        edit_menu.addAction(history_action)
+        self.history_action = history_action
+        
         # 视图菜单
         view_menu = menubar.addMenu("视图(&V)")
         

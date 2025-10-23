@@ -29,6 +29,7 @@ class OperationLog:
     # 状态
     status: str = 'success'             # 'success', 'failed', 'reverted'
     error: Optional[str] = None         # 错误信息（如果失败）
+    reverted: bool = False              # 是否已撤销
     
     def to_dict(self) -> dict:
         """转换为字典"""
@@ -108,6 +109,22 @@ class ProvenanceManager:
     def get_all_operations(self) -> List[OperationLog]:
         """获取所有操作记录"""
         return self._operations.copy()
+    
+    def get_all_logs(self) -> List[Dict[str, Any]]:
+        """获取所有操作日志（字典格式，用于显示）"""
+        return [
+            {
+                'op_id': op.op_id,
+                'op_type': op.op_type,
+                'timestamp': op.timestamp,
+                'description': op.description,
+                'inputs': op.inputs,
+                'outputs': op.outputs,
+                'status': op.status,
+                'reverted': op.reverted
+            }
+            for op in self._operations
+        ]
     
     def get_operation_by_id(self, op_id: str) -> Optional[OperationLog]:
         """根据ID获取操作记录"""

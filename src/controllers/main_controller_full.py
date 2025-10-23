@@ -41,6 +41,11 @@ class MainControllerFull(QObject):
         self.project_manager = self.session_manager.project_manager
         self.link_manager = self.session_manager.link_manager
         
+        # ⭐ 数据血缘和撤回/重做
+        from src.models import ProvenanceManager, CommandManager
+        self.provenance_manager = ProvenanceManager()
+        self.command_manager = CommandManager(self.provenance_manager, max_history=50)
+        
         # 当前选中的ID
         self.current_data_id: Optional[int] = None
         self.current_figure_id: Optional[int] = None
@@ -87,6 +92,14 @@ class MainControllerFull(QObject):
         self.session_manager.session_modified.connect(self.on_session_modified)
         self.session_manager.session_saved.connect(self.on_session_saved)
         self.session_manager.session_loaded.connect(self.on_session_loaded)
+        
+        # ⭐ 编辑菜单 -> Controller (撤回/重做)
+        if hasattr(self.view, 'undo_action'):
+            self.view.undo_action.triggered.connect(self.on_undo_requested)
+        if hasattr(self.view, 'redo_action'):
+            self.view.redo_action.triggered.connect(self.on_redo_requested)
+        if hasattr(self.view, 'history_action'):
+            self.view.history_action.triggered.connect(self.on_show_history)
         
         # ✨ 工具菜单 -> Controller（Phase 2+）
         self.view.stats_action.triggered.connect(self.on_view_stats)
@@ -139,14 +152,116 @@ class MainControllerFull(QObject):
     @Slot(str)
     def on_file_selected(self, file_path: str):
         """
-        处理文件选择（完全参考原项目spr_controller_main.py）
-        
-        原项目流程（spr_controller_main.py第186-191行）：
-        1. data = json_reader.json_reader(file_path)
-        2. self.model.add_new_data(data, 'file')
-        3. self.view.items_data[data_count].data_in_from_json(data)
+        处理文件选择（保留原有逻辑，但记录到Command历史）
         """
         self.view.update_status(f"正在加载: {file_path}")
+        
+        # 记录导入前的所有对象ID
+        before_data = set(self.data_manager._data_dict.keys())
+        before_figures = set(self.figure_manager._figures.keys())
+        
+        # 调用原有导入逻辑
+        success = self._do_import_file(file_path)
+        
+        if success:
+            # 记录导入后新增的所有对象ID
+            after_data = set(self.data_manager._data_dict.keys())
+            after_figures = set(self.figure_manager._figures.keys())
+            new_data_ids = list(after_data - before_data)
+            new_figure_ids = list(after_figures - before_figures)
+            
+            # 创建Command并记录到历史（不执行，只记录）
+            if new_data_ids:
+                from src.models.commands import ICommand
+                from src.models.provenance import OperationLog
+                import uuid
+                from datetime import datetime
+                import os
+                
+                class PostImportCommand(ICommand):
+                    """后置记录的导入命令"""
+                    def __init__(self, file_path, data_ids, figure_ids, controller):
+                        super().__init__()
+                        self.file_path = file_path
+                        self.data_ids = data_ids
+                        self.figure_ids = figure_ids
+                        self.controller = controller
+                        self.op_id = str(uuid.uuid4())
+                    
+                    def execute(self) -> bool:
+                        # 重做：重新导入文件
+                        try:
+                            # 导入前记录现有对象
+                            before_data = set(self.controller.data_manager._data_dict.keys())
+                            before_figures = set(self.controller.figure_manager._figures.keys())
+                            
+                            success = self.controller._do_import_file(self.file_path)
+                            
+                            if success:
+                                # 导入后获取新增对象
+                                after_data = set(self.controller.data_manager._data_dict.keys())
+                                after_figures = set(self.controller.figure_manager._figures.keys())
+                                
+                                # 更新记录的ID（因为重做时ID可能不同）
+                                self.data_ids = list(after_data - before_data)
+                                self.figure_ids = list(after_figures - before_figures)
+                                
+                                # 注意：_do_import_file 内部会触发 on_data_added，
+                                # on_data_added 会自动添加节点到树，所以这里不需要手动添加
+                            
+                            return success
+                        except Exception as e:
+                            self.error = str(e)
+                            return False
+                    
+                    def undo(self) -> bool:
+                        # 撤销：删除所有导入的数据和图表
+                        try:
+                            project = self.controller.project_manager.get_current_project()
+                            
+                            # 删除图表
+                            for figure_id in self.figure_ids:
+                                if project and figure_id in project.figure_ids:
+                                    project.figure_ids.remove(figure_id)
+                                self.controller.figure_manager.remove_figure(figure_id)
+                            
+                            # 删除数据
+                            for data_id in self.data_ids:
+                                if project and data_id in project.data_ids:
+                                    project.data_ids.remove(data_id)
+                                self.controller.data_manager.remove_data(data_id)
+                            
+                            return True
+                        except Exception as e:
+                            self.error = str(e)
+                            return False
+                    
+                    def get_description(self) -> str:
+                        filename = os.path.basename(self.file_path)
+                        total = len(self.data_ids) + len(self.figure_ids)
+                        return f"导入文件: {filename} ({len(self.data_ids)}数据, {len(self.figure_ids)}图表)"
+                    
+                    def to_operation_log(self) -> OperationLog:
+                        return OperationLog(
+                            op_id=self.op_id,
+                            op_type='import',
+                            timestamp=datetime.now().isoformat(),
+                            inputs={'file_path': self.file_path},
+                            outputs={'data_ids': self.data_ids, 'figure_ids': self.figure_ids},
+                            description=self.get_description(),
+                            status='success'
+                        )
+                
+                cmd = PostImportCommand(file_path, new_data_ids, new_figure_ids, self)
+                # 手动添加到历史栈
+                self.command_manager._undo_stack.append(cmd)
+                self.command_manager._redo_stack.clear()
+                # 记录血缘
+                self.command_manager._provenance.record_operation(cmd.to_operation_log())
+    
+    def _do_import_file(self, file_path: str) -> bool:
+        """执行实际的文件导入逻辑（保留原有代码）"""
+        # ========== 原有的导入代码 ==========
         
         import os
         file_name = os.path.basename(file_path)
@@ -164,7 +279,7 @@ class MainControllerFull(QObject):
             if not json_data:
                 self.view.show_error("加载失败", "无法读取JSON文件")
                 self.view.update_status("加载失败")
-                return
+                return False
             
             # 2. 提取元信息
             display_name = file_name
@@ -187,7 +302,7 @@ class MainControllerFull(QObject):
             if not success:
                 self.view.show_error("DataFrame转换失败", error)
                 self.view.update_status("加载失败")
-                return
+                return False
             # ⭐ 新增：将JSON解析得到的宽表导出为Excel并自动导入
             try:
                 import os
@@ -260,8 +375,9 @@ class MainControllerFull(QObject):
             # ✅ 不弹窗，改为状态栏关键信息
             self.view.update_status(info.replace('\n', ' | '))
             
-            print(f"[Controller] JSON文件导入完成，已创建链接: file:{file_path} → data:{data_id}")
+            print(f"[Controller] JSON文件导入完成")
             print(f"[Controller] 实际显示数据行数: {total_rows}")
+            return True
             
         else:
             # 其他文件类型：使用通用方式
@@ -272,7 +388,7 @@ class MainControllerFull(QObject):
             if not success:
                 self.view.show_error("加载失败", error)
                 self.view.update_status("加载失败")
-                return
+                return False
             
             # ========= 宽表Excel：创建父+子节点结构（不保留单独总节点） =========
             try:
@@ -293,7 +409,7 @@ class MainControllerFull(QObject):
                     self.view.data_table.load_data(df)
                     self.view.update_status(f"已加载: {display_name} (宽表)")
                     print(f"[Controller] Excel宽表导入完成，父节点已创建: parent={parent_id}（子节点由on_data_added负责）")
-                    return
+                    return True
             except Exception as e:
                 print(f"[Controller] 宽表Excel节点构建失败，退回单节点: {e}")
 
@@ -311,6 +427,7 @@ class MainControllerFull(QObject):
             self.view.data_table.load_data(df)
             self.view.update_status(f"已加载: {display_name}")
             print(f"[Controller] 文件导入完成，已创建链接: file:{file_path} → data:{data_id}")
+            return True
     
     @Slot(str, str)
     def on_new_item_created(self, item_type: str, item_name: str):
@@ -355,9 +472,18 @@ class MainControllerFull(QObject):
         1. 手动点击"新建"：dataframe为空 → 添加到树
         2. 单样本JSON：dataframe不为空 → 添加到树
         3. 宽表父节点：由此创建子节点（split_sample），避免重复创建
+        4. 拟合曲线数据：只添加到树，不创建子节点
         """
         data = self.data_manager.get_data(data_id)
         if not data:
+            return
+        
+        # ⭐ 特殊情况：拟合曲线数据，只添加到树即可
+        if (data.dataframe is not None and 
+            hasattr(data.dataframe, 'attrs') and 
+            data.dataframe.attrs.get('source_type') == 'fitted_curve'):
+            self.view.add_data_to_tree(data_id, data.name)
+            print(f"[Controller] 添加拟合曲线数据到树: {data.name}")
             return
         
         # 若这是一个宽表父节点且还未生成子节点，则在此生成
@@ -547,21 +673,54 @@ class MainControllerFull(QObject):
     @Slot(int, str)
     def on_fitting_requested(self, data_id: int, method: str):
         """
-        请求拟合（增强版：自动创建链接）
-        
-        数据流：
-        data:X → result:Y → figure:Z
-        
-        链接类型：
-        - data → result: fitting_output
-        - result → figure: visualization
+        请求拟合（使用Command模式）
         """
-        data = self.data_manager.get_data(data_id)
+        from src.models import FitDataCommand
         
+        data = self.data_manager.get_data(data_id)
         if not data:
             self.view.show_error("拟合失败", "数据不存在")
             return
         
+        self.view.update_status(f"正在拟合: {method}")
+        
+        # 创建并执行拟合命令
+        cmd = FitDataCommand(
+            data_id=data_id,
+            method=method,
+            data_manager=self.data_manager,
+            result_manager=self.result_manager,
+            figure_manager=self.figure_manager,
+            link_manager=self.link_manager,
+            project_manager=self.project_manager
+        )
+        
+        if self.command_manager.execute(cmd):
+            # 拟合成功
+            self.view.update_status(f"拟合完成: {method}")
+            
+            # 注意：不要手动添加节点到树！
+            # FitDataCommand.execute() 会调用 data_manager.add_data()
+            # 这会触发 on_data_added 信号，自动添加节点到树
+            # 如果在这里再次添加，会导致重复节点
+            
+            # 只需要更新UI显示
+            if cmd.result_id:
+                result = self.result_manager.get_result(cmd.result_id)
+                if result:
+                    self.view.show_result(result.parameters)
+            
+            if cmd.figure_id:
+                # 显示图表
+                self.on_figure_selected(cmd.figure_id)
+        else:
+            # 拟合失败
+            self.view.show_error("拟合失败", cmd.error)
+            self.view.update_status("拟合失败")
+        
+        return
+        
+        # ========== 以下是旧的拟合代码（已废弃，保留供参考） ==========
         self.view.update_status(f"正在拟合: {method}")
         
         try:
@@ -1000,6 +1159,149 @@ class MainControllerFull(QObject):
             return
         
         self.on_fitting_requested(self.current_data_id, method)
+    
+    def on_undo_requested(self):
+        """撤销操作（Ctrl+Z）"""
+        if not self.command_manager.can_undo():
+            self.view.update_status("没有可撤销的操作")
+            return
+        
+        desc = self.command_manager.get_undo_description()
+        
+        if self.command_manager.undo():
+            self.view.update_status(f"已撤销: {desc}")
+            self._refresh_all_ui()
+        else:
+            self.view.show_error("撤销失败", "无法撤销此操作")
+            self.view.update_status("撤销失败")
+    
+    def on_redo_requested(self):
+        """重做操作（Ctrl+Y）"""
+        if not self.command_manager.can_redo():
+            self.view.update_status("没有可重做的操作")
+            return
+        
+        desc = self.command_manager.get_redo_description()
+        
+        if self.command_manager.redo():
+            self.view.update_status(f"已重做: {desc}")
+            self._refresh_all_ui()
+        else:
+            self.view.show_error("重做失败", "无法重做此操作")
+            self.view.update_status("重做失败")
+    
+    def _refresh_all_ui(self):
+        """刷新所有UI（撤销/重做后）"""
+        # 清空树
+        if hasattr(self.view, 'project_tree'):
+            self.view.project_tree.clear_all()
+        
+        # 重新添加所有对象
+        for data_id, data in self.data_manager._data_dict.items():
+            self.view.add_data_to_tree(data_id, data.name)
+        
+        for figure in self.figure_manager.get_all_figures():
+            self.view.add_figure_to_tree(figure.id, figure.name)
+        
+        for result in self.result_manager.get_all_results():
+            self.view.add_result_to_tree(result.id, result.name)
+        
+        # 清空当前显示
+        self.current_data_id = None
+        self.current_figure_id = None
+        self.current_result_id = None
+    
+    def on_show_history(self):
+        """显示操作历史和数据血缘"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
+        
+        dialog = QDialog(self.view)
+        dialog.setWindowTitle("操作历史与数据血缘")
+        dialog.resize(800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 文本显示区
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setStyleSheet("font-family: Consolas, monospace;")
+        
+        # 生成历史文本
+        history_text = "========== 操作历史 ==========\n\n"
+        
+        # 撤销栈
+        history_text += "【可撤销的操作】\n"
+        if self.command_manager._undo_stack:
+            for i, cmd in enumerate(self.command_manager._undo_stack):
+                desc = cmd.get_description()
+                history_text += f"  {i+1}. {desc}\n"
+        else:
+            history_text += "  (无)\n"
+        
+        history_text += "\n【已撤销的操作（可重做）】\n"
+        if self.command_manager._redo_stack:
+            for i, cmd in enumerate(self.command_manager._redo_stack):
+                desc = cmd.get_description()
+                history_text += f"  {i+1}. {desc}\n"
+        else:
+            history_text += "  (无)\n"
+        
+        # 数据血缘
+        history_text += "\n\n========== 数据血缘 ==========\n\n"
+        all_logs = self.provenance_manager.get_all_logs()
+        
+        if all_logs:
+            for log in all_logs:
+                history_text += f"[{log['op_type'].upper()}] {log['description']}\n"
+                history_text += f"  时间: {log['timestamp']}\n"
+                history_text += f"  输入: {log['inputs']}\n"
+                history_text += f"  输出: {log['outputs']}\n"
+                history_text += f"  状态: {log['status']}\n"
+                if log.get('reverted'):
+                    history_text += f"  ⚠️ 已撤销\n"
+                history_text += "\n"
+        else:
+            history_text += "(无记录)\n"
+        
+        text_edit.setPlainText(history_text)
+        layout.addWidget(text_edit)
+        
+        # 按钮
+        button_layout = QHBoxLayout()
+        
+        export_btn = QPushButton("导出...")
+        export_btn.clicked.connect(lambda: self._export_history(history_text))
+        button_layout.addWidget(export_btn)
+        
+        button_layout.addStretch()
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        
+        dialog.exec()
+    
+    def _export_history(self, text: str):
+        """导出历史文本"""
+        from PySide6.QtWidgets import QFileDialog
+        import os
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self.view,
+            "导出操作历史",
+            os.path.join(os.getcwd(), "history.txt"),
+            "文本文件 (*.txt);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                self.view.update_status(f"已导出历史到: {file_path}")
+            except Exception as e:
+                self.view.show_error("导出失败", str(e))
 
     def _on_fit_from_menu(self):
         """菜单/工具栏：开始拟合（弹出方法选择，无需预先选中数据）"""
@@ -1232,13 +1534,10 @@ class MainControllerFull(QObject):
     @Slot(int)
     def on_create_figure_from_data(self, data_id: int):
         """
-        从数据创建图表（右键菜单）
-        
-        ⭐ 阶段1改进：使用Figure.add_data_source而不是直接设置数据
-        
-        参数:
-            data_id: 数据ID
+        从数据创建图表（使用Command模式）
         """
+        from src.models import CreateFigureCommand
+        
         print(f"[Controller] 从数据创建图表: data_id={data_id}")
         
         # 获取数据
@@ -1247,46 +1546,27 @@ class MainControllerFull(QObject):
             self.view.show_error("错误", f"找不到数据 ID={data_id}")
             return
         
-        # 检查数据是否为空
-        if data.dataframe is None or data.dataframe.empty:
-            self.view.show_error("错误", "数据为空，无法创建图表")
-            return
-        
-        # ⭐ 创建图表（使用新API）
-        figure_id = self.figure_manager.add_figure(
-            f"{data.name} - 数据图",
-            "line"
-        )
-        figure = self.figure_manager.get_figure(figure_id)
-        
-        # ⭐ 使用新API添加数据源（而不是设置数据副本）
-        figure.add_data_source(data_id, {
-            'label': data.name,
-            'color': '#1a73e8',
-            'linewidth': 2.0,
-            'marker': 'o',
-            'markersize': 4.0
-        })
-        
-        # 创建链接：data → figure
-        self.link_manager.create_link(
-            'data', data_id,
-            'figure', figure_id,
-            link_type='visualize',
-            metadata={
-                'figure_type': 'line',
-                'created_time': datetime.now().isoformat()
-            }
+        # 创建并执行命令
+        cmd = CreateFigureCommand(
+            data_id=data_id,
+            figure_name=f"{data.name} - 数据图",
+            figure_type="line",
+            data_manager=self.data_manager,
+            figure_manager=self.figure_manager,
+            link_manager=self.link_manager,
+            project_manager=self.project_manager
         )
         
-        # ⭐ 显示图表（通过调用on_figure_selected）
-        self.on_figure_selected(figure_id)
-        
-        # 高亮图表节点
-        self.view.highlight_tree_item('figure', figure_id)
-        
-        self.view.update_status(f"已创建图表: {figure.name}")
-        print(f"[Controller] 图表创建完成: figure_id={figure_id}, 数据源={data_id}")
+        if self.command_manager.execute(cmd):
+            # 成功：显示图表
+            if cmd.figure_id:
+                self.view.add_figure_to_tree(cmd.figure_id, cmd.figure_name)
+                self.on_figure_selected(cmd.figure_id)
+            self.view.update_status(f"已创建图表: {cmd.figure_name}")
+        else:
+            # 失败
+            self.view.show_error("创建图表失败", cmd.error)
+            self.view.update_status("创建图表失败")
     
     @Slot(int)
     def on_fit_data_requested(self, data_id: int):

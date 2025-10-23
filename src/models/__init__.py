@@ -11,6 +11,7 @@ from .session_manager import SessionManager
 from .series_model import Series, SeriesManager
 from .provenance import OperationLog, ProvenanceManager
 from .commands import ICommand, CommandManager
+from .concrete_commands import ImportDataCommand, FitDataCommand, DeleteItemCommand, CreateFigureCommand
 
 __all__ = [
     'Data', 'DataManager',
@@ -21,6 +22,7 @@ __all__ = [
     'SessionManager',
     'Series', 'SeriesManager',
     'OperationLog', 'ProvenanceManager',
-    'ICommand', 'CommandManager'
+    'ICommand', 'CommandManager',
+    'ImportDataCommand', 'FitDataCommand', 'DeleteItemCommand', 'CreateFigureCommand'
 ]
 
