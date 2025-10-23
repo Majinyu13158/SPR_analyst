@@ -361,6 +361,28 @@ class LinkManager(QObject):
             print(f"  - {link_type}: {count}")
         print(f"{'='*50}\n")
     
+    def get_all_links(self) -> List[Dict]:
+        """
+        获取所有链接数据
+        
+        返回:
+            链接列表，每个链接包含 source_type, source_id, target_type, target_id, link_type
+        """
+        links = []
+        for link_data in self.link_metadata.values():
+            source_type, source_id = self._parse_key(link_data['source'])
+            target_type, target_id = self._parse_key(link_data['target'])
+            
+            links.append({
+                'source_type': source_type,
+                'source_id': source_id,
+                'target_type': target_type,
+                'target_id': target_id,
+                'link_type': link_data.get('link_type', ''),
+                'metadata': link_data.get('metadata', {})
+            })
+        return links
+    
     def print_all_links(self):
         """打印所有链接（用于调试）"""
         print(f"\n{'='*50}")

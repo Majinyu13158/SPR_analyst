@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QMenuBar, QMenu, QToolBar, QTabWidget, QSizePolicy, QLabel, QStackedLayout
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QAction, QIcon
 try:
     from qfluentwidgets import FluentIcon
@@ -22,8 +22,7 @@ from .widgets import (
     DataTableWidget,
     ResultTableWidget,
     ProjectDetailTableWidget,
-    CanvasWidget,
-    SeriesTreeWidget
+    CanvasWidget
 )
 # ⭐ 导入新的Canvas实现（直接继承FigureCanvas）
 # 使用具备滚轮缩放/平移/双击复位与视图持久化的CanvasWidget
@@ -68,6 +67,13 @@ class MainWindowFull(QMainWindow):
         # 窗口基本设置
         self.setWindowTitle(config.WINDOW_TITLE)
         self.resize(config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
+        
+        # 设置窗口图标
+        import os
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'app_icon.png')
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon
+            self.setWindowIcon(QIcon(icon_path))
         
         # 创建菜单栏和工具栏
         self._create_menubar()
@@ -150,15 +156,26 @@ class MainWindowFull(QMainWindow):
         
         fit_action = QAction("开始拟合(&F)", self)
         fit_action.setShortcut("F5")
+        fit_action.setStatusTip("对当前选中的数据进行拟合分析")
         analysis_menu.addAction(fit_action)
-        # 暴露给Controller连接
         self.fit_action = fit_action
         
-        # 允许再次拟合
-        unlock_fit_action = QAction("允许再次拟合当前数据(&U)", self)
-        unlock_fit_action.setStatusTip("解锁当前数据的拟合熔断标志，允许再次拟合")
-        analysis_menu.addAction(unlock_fit_action)
-        self.unlock_fit_action = unlock_fit_action
+        analysis_menu.addSeparator()
+        
+        # 多数据拟合
+        batch_fit_action = QAction("批量拟合(&B)...", self)
+        batch_fit_action.setStatusTip("同时对多个数据进行拟合")
+        analysis_menu.addAction(batch_fit_action)
+        self.batch_fit_action = batch_fit_action
+        
+        analysis_menu.addSeparator()
+        
+        # 数据对比
+        comparison_action = QAction("数据对比(&C)...", self)
+        comparison_action.setShortcut("Ctrl+M")
+        comparison_action.setStatusTip("对比多个数据及其拟合结果")
+        analysis_menu.addAction(comparison_action)
+        self.comparison_action = comparison_action
         
         # 编辑菜单
         edit_menu = menubar.addMenu("编辑(&E)")
@@ -174,6 +191,15 @@ class MainWindowFull(QMainWindow):
         redo_action.setStatusTip("重做已撤销的操作")
         edit_menu.addAction(redo_action)
         self.redo_action = redo_action
+        
+        edit_menu.addSeparator()
+        
+        # 搜索功能
+        search_action = QAction("搜索(&F)...", self)
+        search_action.setShortcut("Ctrl+F")
+        search_action.setStatusTip("搜索数据、图表、结果")
+        edit_menu.addAction(search_action)
+        self.search_action = search_action
         
         edit_menu.addSeparator()
         
@@ -193,41 +219,40 @@ class MainWindowFull(QMainWindow):
         zoom_out_action.setShortcut("Ctrl+-")
         view_menu.addAction(zoom_out_action)
         
-        # 工具菜单（调试和实用功能）
+        view_menu.addSeparator()
+        
+        # 血缘图
+        lineage_action = QAction("数据血缘图(&L)...", self)
+        lineage_action.setShortcut("Ctrl+L")
+        lineage_action.setStatusTip("查看数据血缘关系图")
+        view_menu.addAction(lineage_action)
+        self.lineage_action = lineage_action
+        
+        # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
         
-        # 查看会话统计
-        stats_action = QAction("📊 查看会话统计(&S)", self)
-        stats_action.setShortcut("Ctrl+I")
+        # 会话信息
+        stats_action = QAction("会话统计(&S)...", self)
         stats_action.setStatusTip("查看当前会话的统计信息")
         tools_menu.addAction(stats_action)
         
-        # 查看链接信息
-        links_action = QAction("🔗 查看所有链接(&L)", self)
-        links_action.setStatusTip("查看所有对象之间的链接关系")
-        tools_menu.addAction(links_action)
-        
         tools_menu.addSeparator()
         
-        # 自动保存控制
-        auto_save_toggle = QAction("自动保存", self)
+        # 自动保存
+        auto_save_toggle = QAction("启用自动保存(&A)", self)
         auto_save_toggle.setCheckable(True)
+        auto_save_toggle.setChecked(True)
         tools_menu.addAction(auto_save_toggle)
 
-        auto_save_interval = QAction("设置自动保存间隔...", self)
+        auto_save_interval = QAction("自动保存间隔(&I)...", self)
         tools_menu.addAction(auto_save_interval)
 
         tools_menu.addSeparator()
 
-        # 清空所有数据
-        clear_action = QAction("🗑️ 清空所有数据(&C)", self)
-        clear_action.setStatusTip("清空当前会话中的所有数据")
+        # 清空
+        clear_action = QAction("清空所有数据(&C)...", self)
+        clear_action.setStatusTip("清空当前会话中的所有数据（不可撤销）")
         tools_menu.addAction(clear_action)
-        
-        # 导出链接图
-        export_graph_action = QAction("📈 导出链接图(&G)", self)
-        export_graph_action.setStatusTip("导出数据血缘图")
-        tools_menu.addAction(export_graph_action)
         
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
@@ -251,83 +276,72 @@ class MainWindowFull(QMainWindow):
         self.menu_rename_session_action = rename_session_action
         self.recent_menu = recent_menu
         self.stats_action = stats_action
-        self.links_action = links_action
         self.clear_action = clear_action
-        self.export_graph_action = export_graph_action
         self.test_guide_action = test_guide_action
         self.auto_save_toggle_action = auto_save_toggle
         self.auto_save_interval_action = auto_save_interval
     
     def _create_toolbar(self):
-        """创建工具栏（现代化、简洁）"""
+        """创建工具栏（精简版，只保留常用操作）"""
         toolbar = QToolBar("主工具栏")
         toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(24, 24))  # 设置图标大小
         self.addToolBar(toolbar)
         
-        # 导入数据
-        import_action = QAction("导入", self)
+        # 文件操作组
+        import_action = QAction("📁 导入", self)
         import_action.setStatusTip("导入JSON/Excel/CSV等数据文件")
+        import_action.setShortcut("Ctrl+I")
         toolbar.addAction(import_action)
         
-        # 打开会话
-        open_action = QAction("打开会话", self)
+        open_action = QAction("📂 打开", self)
         open_action.setStatusTip("打开.sprx会话文件")
+        open_action.setShortcut("Ctrl+O")
         toolbar.addAction(open_action)
         
-        # 保存
-        save_action = QAction("保存", self)
+        save_action = QAction("💾 保存", self)
+        save_action.setStatusTip("保存当前会话")
+        save_action.setShortcut("Ctrl+S")
         toolbar.addAction(save_action)
-        
-        # 另存为（工具栏可选占位）
-        save_as_action = QAction("另存为", self)
-        toolbar.addAction(save_as_action)
         
         toolbar.addSeparator()
         
-        # 拟合
-        fit_action = QAction("拟合", self)
-        fit_action.setStatusTip("开始数据拟合")
+        # 编辑操作组
+        undo_action = QAction("↶ 撤销", self)
+        undo_action.setStatusTip("撤销上一步操作 (Ctrl+Z)")
+        undo_action.setShortcut("Ctrl+Z")
+        toolbar.addAction(undo_action)
+        self.toolbar_undo_action = undo_action
+        
+        redo_action = QAction("↷ 重做", self)
+        redo_action.setStatusTip("重做已撤销的操作 (Ctrl+Y)")
+        redo_action.setShortcut("Ctrl+Y")
+        toolbar.addAction(redo_action)
+        self.toolbar_redo_action = redo_action
+        
+        toolbar.addSeparator()
+        
+        # 分析操作组
+        fit_action = QAction("📊 拟合", self)
+        fit_action.setStatusTip("开始数据拟合 (F5)")
+        fit_action.setShortcut("F5")
         toolbar.addAction(fit_action)
-        # 暴露给Controller连接（工具栏按钮）
+        
+        # 暴露给Controller连接
         self.toolbar_fit_action = fit_action
         self.toolbar_import_action = import_action
         self.toolbar_open_session_action = open_action
         self.toolbar_save_action = save_action
-        self.toolbar_save_as_action = save_as_action
-        
-        # 额外基础按键（占位）
-        toolbar.addSeparator()
-        refresh_action = QAction("刷新", self)
-        export_action = QAction("导出", self)
-        settings_action = QAction("设置", self)
-        help_action = QAction("帮助", self)
-        toolbar.addAction(refresh_action)
-        toolbar.addAction(export_action)
-        toolbar.addAction(settings_action)
-        toolbar.addAction(help_action)
     
     def _create_left_docks(self):
-        """创建左侧可停靠面板（项目树/系列树）"""
+        """创建左侧可停靠面板（项目树）"""
         from PySide6.QtWidgets import QDockWidget
         # 项目导航树 Dock
         self.project_tree = ProjectTreeWidget()
-        self.data_dock = QDockWidget("数据", self)
+        self.data_dock = QDockWidget("项目导航", self)
         self.data_dock.setWidget(self.project_tree)
         self.data_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.data_dock)
-
-        # 系列树 Dock
-        self.series_tree = SeriesTreeWidget()
-        self.series_dock = QDockWidget("系列", self)
-        self.series_dock.setWidget(self.series_tree)
-        self.series_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.series_dock)
-
-        # 垂直分布（上：数据树，下：系列树）
-        try:
-            self.splitDockWidget(self.data_dock, self.series_dock, Qt.Vertical)
-        except Exception:
-            pass
     
     def _create_center_panel(self) -> QWidget:
         """创建中间面板"""

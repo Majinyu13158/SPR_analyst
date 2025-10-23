@@ -5,13 +5,67 @@
 从旧版本迁移：spr_controller_main.py
 协调MainWindowFull、所有Model和业务逻辑
 """
-from PySide6.QtCore import QObject, Slot
+from PySide6.QtCore import QObject, Slot, QRunnable, Signal, QThreadPool, QTimer
 from typing import Optional
 from datetime import datetime
 import pandas as pd
 from src.views import MainWindowFull
 from src.models import SessionManager
 from src.utils import load_file, fit_data
+
+
+# ========== 批量拟合任务类 ==========
+
+class FitTaskSignals(QObject):
+    """拟合任务信号"""
+    finished = Signal(dict)  # 拟合成功，参数：result_dict
+    error = Signal(str)      # 拟合失败，参数：error_message
+
+
+class FitTask(QRunnable):
+    """
+    单个拟合任务（可在线程池中执行）
+    
+    设计要点：
+    - 只传递可pickle的数据（numpy数组）
+    - 不直接访问Qt对象
+    - 通过信号返回结果
+    """
+    
+    def __init__(self, data_id: int, data_name: str, x_data, y_data, method: str):
+        super().__init__()
+        self.data_id = data_id
+        self.data_name = data_name
+        self.x_data = x_data
+        self.y_data = y_data
+        self.method = method
+        self.signals = FitTaskSignals()
+    
+    def run(self):
+        """执行拟合（在后台线程中）"""
+        print(f"[FitTask] 开始拟合: {self.data_name} (ID={self.data_id})")
+        try:
+            # 调用拟合函数
+            result = fit_data(self.method, self.x_data, self.y_data)
+            print(f"[FitTask] 拟合完成: {self.data_name}, success={result.get('success')}")
+            
+            # 返回结果
+            result_dict = {
+                'data_id': self.data_id,
+                'method': self.method,
+                'parameters': result.get('parameters', {}),
+                'y_pred': result.get('y_pred'),
+                'metrics': result.get('statistics', {})
+            }
+            
+            print(f"[FitTask] 准备发射finished信号: {self.data_name}")
+            self.signals.finished.emit(result_dict)
+            print(f"[FitTask] finished信号已发射: {self.data_name}")
+            
+        except Exception as e:
+            error_msg = f"{str(e)}"
+            print(f"[FitTask] 拟合失败: {self.data_name}, error={error_msg}")
+            self.signals.error.emit(error_msg)
 
 
 class MainControllerFull(QObject):
@@ -71,13 +125,21 @@ class MainControllerFull(QObject):
         self.view.result_item_selected.connect(self.on_result_selected)
         self.view.fitting_requested.connect(self.on_fitting_requested)
         
+        # Canvas -> Controller (右键菜单)
+        if hasattr(self.view, 'canvas_widget'):
+            self.view.canvas_widget.edit_style_requested.connect(self._on_canvas_edit_style)
+            self.view.canvas_widget.export_figure_requested.connect(self._on_canvas_export_figure)
+        
         # 树形控件 -> Controller
         self.view.project_tree.new_item_created.connect(self.on_new_item_created)
         self.view.project_tree.create_figure_from_data.connect(self.on_create_figure_from_data)
         self.view.project_tree.fit_data_requested.connect(self.on_fit_data_requested)
+        self.view.project_tree.batch_fit_requested.connect(self.on_batch_fit_requested)
         self.view.project_tree.change_figure_source.connect(self.on_change_figure_source)
         self.view.project_tree.view_linked_data.connect(self.on_view_linked_data)
         self.view.project_tree.export_item.connect(self.on_export_item)
+        self.view.project_tree.add_to_comparison.connect(self.on_add_to_comparison)
+        self.view.project_tree.edit_figure_style.connect(self.on_edit_figure_style)
         
         # Model -> Controller
         self.data_manager.data_added.connect(self.on_data_added)
@@ -100,12 +162,18 @@ class MainControllerFull(QObject):
             self.view.redo_action.triggered.connect(self.on_redo_requested)
         if hasattr(self.view, 'history_action'):
             self.view.history_action.triggered.connect(self.on_show_history)
+        if hasattr(self.view, 'search_action'):
+            self.view.search_action.triggered.connect(self.on_search_requested)
+        if hasattr(self.view, 'lineage_action'):
+            self.view.lineage_action.triggered.connect(self.on_show_lineage)
+        if hasattr(self.view, 'comparison_action'):
+            self.view.comparison_action.triggered.connect(self.on_show_comparison)
         
         # ✨ 工具菜单 -> Controller（Phase 2+）
         self.view.stats_action.triggered.connect(self.on_view_stats)
-        self.view.links_action.triggered.connect(self.on_view_links)
+        # self.view.links_action 已移除（UI优化）
         self.view.clear_action.triggered.connect(self.on_clear_all)
-        self.view.export_graph_action.triggered.connect(self.on_export_graph)
+        # self.view.export_graph_action 已移除（UI优化）
         self.view.test_guide_action.triggered.connect(self.on_show_test_guide)
         if hasattr(self.view, 'auto_save_toggle_action'):
             self.view.auto_save_toggle_action.setChecked(self.session_manager.auto_save_enabled)
@@ -1211,6 +1279,127 @@ class MainControllerFull(QObject):
         self.current_figure_id = None
         self.current_result_id = None
     
+    @Slot()
+    def on_search_requested(self):
+        """聚焦到搜索框（Ctrl+F）"""
+        self.view.project_tree.focus_search()
+    
+    @Slot()
+    def on_show_lineage(self):
+        """显示数据血缘图（Ctrl+L）"""
+        from src.views.dialogs import LineageDialog
+        
+        # ⭐ 如果血缘图窗口已存在，直接显示并置前
+        if hasattr(self, '_lineage_dialog') and self._lineage_dialog is not None:
+            self._lineage_dialog.show()
+            self._lineage_dialog.raise_()
+            self._lineage_dialog.activateWindow()
+            return
+        
+        # 创建新的血缘图窗口（非模态）
+        self._lineage_dialog = LineageDialog(
+            link_manager=self.link_manager,
+            data_manager=self.data_manager,
+            result_manager=self.result_manager,
+            figure_manager=self.figure_manager,
+            provenance_manager=self.provenance_manager,
+            parent=self.view
+        )
+        
+        # ⭐ 连接节点点击信号
+        self._lineage_dialog.node_clicked.connect(self._on_lineage_node_clicked)
+        
+        # ⭐ 使用 show() 而不是 exec() → 非模态显示
+        self._lineage_dialog.show()
+    
+    @Slot()
+    def on_show_comparison(self):
+        """显示数据对比窗口（Ctrl+M）"""
+        from src.views.dialogs import ComparisonDialog
+        
+        # ⭐ 如果对比窗口已存在，直接显示并置前
+        if hasattr(self, '_comparison_dialog') and self._comparison_dialog is not None:
+            self._comparison_dialog.show()
+            self._comparison_dialog.raise_()
+            self._comparison_dialog.activateWindow()
+            return
+        
+        # 创建新的对比窗口（非模态）
+        self._comparison_dialog = ComparisonDialog(
+            data_manager=self.data_manager,
+            result_manager=self.result_manager,
+            figure_manager=self.figure_manager,
+            link_manager=self.link_manager,
+            parent=self.view
+        )
+        
+        # ⭐ 连接"添加数据"按钮信号（暂时不实现选择器，直接提示用户从项目树添加）
+        self._comparison_dialog.add_data_requested.connect(self._on_comparison_add_requested)
+        
+        # ⭐ 使用 show() 而不是 exec() → 非模态显示
+        self._comparison_dialog.show()
+    
+    @Slot(list)
+    def on_add_to_comparison(self, data_ids: list):
+        """从项目树添加数据到对比"""
+        # 确保对比窗口打开
+        self.on_show_comparison()
+        
+        # 添加数据到对比窗口
+        for data_id in data_ids:
+            self._comparison_dialog.add_data(data_id)
+        
+        self.view.update_status(f"已添加 {len(data_ids)} 个数据到对比窗口")
+    
+    @Slot()
+    def _on_comparison_add_requested(self):
+        """对比窗口请求添加数据"""
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self.view,
+            "添加数据到对比",
+            "请在左侧项目树中选择数据节点，右键选择\"添加到对比\"。\n\n"
+            "支持多选数据（按住Ctrl点击），然后右键批量添加。"
+        )
+    
+    def _on_lineage_node_clicked(self, node_id: str):
+        """
+        血缘图节点被点击
+        
+        参数:
+            node_id: 节点ID (如 "data:5", "figure:3", "result:2")
+        """
+        print(f"[Controller] 血缘图节点点击: {node_id}")
+        
+        # 解析节点ID
+        parts = node_id.split(':')
+        if len(parts) != 2:
+            return
+        
+        obj_type, obj_id_str = parts
+        try:
+            obj_id = int(obj_id_str)
+        except ValueError:
+            return
+        
+        # 根据类型切换到相应内容
+        if obj_type == 'data':
+            print(f"[Controller] 切换到数据: {obj_id}")
+            self.on_data_selected(obj_id)
+            # 高亮树节点
+            self.view.project_tree.highlight_item('data', obj_id)
+        elif obj_type == 'figure':
+            print(f"[Controller] 切换到图表: {obj_id}")
+            self.on_figure_selected(obj_id)
+            self.view.project_tree.highlight_item('figure', obj_id)
+        elif obj_type == 'result':
+            print(f"[Controller] 切换到结果: {obj_id}")
+            self.on_result_selected(obj_id)
+            self.view.project_tree.highlight_item('result', obj_id)
+        
+        # 更新状态栏
+        self.view.update_status(f"已跳转到: {node_id}")
+    
     def on_show_history(self):
         """显示操作历史和数据血缘"""
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
@@ -1744,6 +1933,279 @@ class MainControllerFull(QObject):
             "功能开发中",
             f"导出功能正在开发中\n\n类型: {item_type}\nID: {item_id}"
         )
+    
+    @Slot(int)
+    def on_edit_figure_style(self, figure_id: int):
+        """编辑图表样式"""
+        from src.views.dialogs import StyleEditorDialog
+        
+        print(f"[Controller] 编辑图表样式: figure_id={figure_id}")
+        
+        # 获取图表对象
+        figure = self.figure_manager.get_figure(figure_id)
+        if not figure:
+            self.view.show_error("错误", f"找不到图表: {figure_id}")
+            return
+        
+        # 获取当前样式（如果有）
+        current_style = None
+        if hasattr(figure, 'plot_style') and figure.plot_style:
+            current_style = figure.plot_style
+        
+        # 打开样式编辑器
+        dialog = StyleEditorDialog(current_style, parent=self.view)
+        dialog.style_applied.connect(lambda style: self._on_style_applied(figure_id, style))
+        
+        if dialog.exec():
+            print(f"[Controller] 样式编辑器已确认")
+        else:
+            print(f"[Controller] 样式编辑器已取消")
+    
+    def _on_style_applied(self, figure_id: int, style: dict):
+        """样式已应用"""
+        print(f"[Controller] 应用样式到图表: figure_id={figure_id}")
+        
+        # 获取图表对象
+        figure = self.figure_manager.get_figure(figure_id)
+        if not figure:
+            return
+        
+        # 保存样式到Figure对象
+        figure.plot_style = style
+        
+        # 重新绘制图表
+        self.on_figure_selected(figure_id)
+        
+        self.view.update_status(f"样式已应用到图表: {figure.name}")
+    
+    @Slot()
+    def _on_canvas_edit_style(self):
+        """从画布右键菜单编辑样式"""
+        if self.current_figure_id is None:
+            self.view.show_error("错误", "当前没有选中的图表")
+            return
+        
+        # 调用已有的编辑样式方法
+        self.on_edit_figure_style(self.current_figure_id)
+    
+    @Slot()
+    def _on_canvas_export_figure(self):
+        """从画布右键菜单导出图表"""
+        if self.current_figure_id is None:
+            self.view.show_error("错误", "当前没有选中的图表")
+            return
+        
+        from src.views.dialogs import ExportFigureDialog
+        
+        # 获取图表对象
+        figure = self.figure_manager.get_figure(self.current_figure_id)
+        if not figure:
+            return
+        
+        # 打开导出对话框
+        dialog = ExportFigureDialog(
+            plot_widget=self.view.canvas_widget.plot_widget,
+            default_filename=f"{figure.name}.png",
+            parent=self.view
+        )
+        dialog.exec()
+    
+    @Slot(list)
+    def on_batch_fit_requested(self, data_ids: list):
+        """
+        批量拟合请求
+        """
+        from src.views.dialogs import BatchFittingDialog
+        from src.views.dialogs.fitting_method_dialog import select_fitting_method
+        
+        print(f"[Controller] 批量拟合请求: {len(data_ids)}个数据")
+        
+        # 准备数据列表（过滤掉无效数据）
+        # 格式：(data_id, data_name, point_count, is_fittable, reason)
+        data_list = []
+        for data_id in data_ids:
+            data = self.data_manager.get_data(data_id)
+            if data:
+                # 检查数据是否可拟合
+                try:
+                    x_data, y_data = data.get_xy_data(auto_sort=False)
+                    if len(x_data) >= 3:
+                        # 可拟合的数据
+                        data_list.append((data_id, data.name, len(x_data), True, ""))
+                    else:
+                        # 数据点不足
+                        data_list.append((data_id, data.name, len(x_data), False, "数据点不足"))
+                except Exception as e:
+                    # 数据无效
+                    data_list.append((data_id, data.name, 0, False, f"数据无效: {str(e)}"))
+        
+        if not data_list:
+            self.view.show_error("批量拟合", "没有可用的数据")
+            return
+        
+        # 获取可用的拟合方法
+        available_methods = ['LocalBivariate', 'GlobalBivariate']
+        
+        # 创建批量拟合对话框
+        dialog = BatchFittingDialog(
+            data_list=data_list,
+            available_methods=available_methods,
+            parent=self.view
+        )
+        
+        # 连接开始拟合信号
+        dialog.start_fitting.connect(
+            lambda selected_ids, method, num_threads: 
+            self._start_batch_fitting(dialog, selected_ids, method, num_threads)
+        )
+        
+        dialog.exec()
+    
+    def _start_batch_fitting(self, dialog, data_ids: list, method: str, num_threads: int):
+        """
+        开始批量拟合（多线程）
+        """
+        from functools import partial
+        
+        print(f"[Controller] 开始批量拟合: {len(data_ids)}个数据, 方法={method}, 线程数={num_threads}")
+        
+        # 初始化进度跟踪
+        self._batch_results = {
+            'total': len(data_ids),
+            'completed': 0,
+            'success': 0,
+            'failed': 0
+        }
+        
+        # 创建线程池
+        thread_pool = QThreadPool.globalInstance()
+        thread_pool.setMaxThreadCount(num_threads)
+        
+        # 为每个数据创建任务
+        for data_id in data_ids:
+            data = self.data_manager.get_data(data_id)
+            if not data:
+                continue
+            
+            try:
+                # 获取数据
+                x_data, y_data = data.get_xy_data(auto_sort=False)
+                
+                # 创建任务
+                task = FitTask(data_id, data.name, x_data, y_data, method)
+                
+                # ⭐ 使用partial避免lambda闭包问题
+                task.signals.finished.connect(
+                    partial(self._on_single_fit_done, dialog, data_id, data.name, True)
+                )
+                task.signals.error.connect(
+                    partial(self._on_single_fit_done, dialog, data_id, data.name, False)
+                )
+                
+                # 启动任务
+                thread_pool.start(task)
+                dialog.append_log(f"⏳ {data.name}: 已加入队列...")
+                
+            except Exception as e:
+                self._on_single_fit_done(dialog, data_id, data.name, False, str(e))
+    
+    def _on_single_fit_done(self, dialog, data_id: int, data_name: str, success: bool, result_or_error=None):
+        """
+        单个拟合完成的回调
+        
+        参数:
+            dialog: 批量拟合对话框
+            data_id: 数据ID
+            data_name: 数据名称
+            success: 是否成功
+            result_or_error: 拟合结果或错误信息
+        """
+        print(f"[批量拟合回调] 收到完成信号: {data_name} (ID={data_id}), success={success}")
+        self._batch_results['completed'] += 1
+        print(f"[批量拟合回调] 进度: {self._batch_results['completed']}/{self._batch_results['total']}")
+        
+        # ⭐ 使用QTimer异步处理，避免阻塞事件循环
+        QTimer.singleShot(0, lambda: self._process_fit_result(dialog, data_id, data_name, success, result_or_error))
+    
+    def _process_fit_result(self, dialog, data_id: int, data_name: str, success: bool, result_or_error=None):
+        """
+        处理拟合结果（异步执行，避免阻塞信号队列）
+        
+        参数:
+            dialog: 批量拟合对话框
+            data_id: 数据ID
+            data_name: 数据名称
+            success: 是否成功
+            result_or_error: 拟合结果或错误信息
+        """
+        print(f"[批量拟合处理] 开始处理结果: {data_name} (ID={data_id})")
+        
+        if success and result_or_error:
+            # 拟合成功，创建结果、拟合曲线和图表（在主线程中）
+            try:
+                # 获取拟合方法
+                method = result_or_error.get('method')
+                if not method:
+                    raise ValueError("拟合结果中缺少method字段")
+                
+                # 使用Command来创建所有相关对象
+                from src.models import FitDataCommand
+                cmd = FitDataCommand(
+                    data_id=data_id,
+                    method=method,
+                    data_manager=self.data_manager,
+                    result_manager=self.result_manager,
+                    figure_manager=self.figure_manager,
+                    link_manager=self.link_manager,
+                    project_manager=self.project_manager
+                )
+                
+                # 执行Command（会重新拟合，这是简化版本）
+                if self.command_manager.execute(cmd):
+                    self._batch_results['success'] += 1
+                    # 尝试从后台拟合结果获取统计信息
+                    try:
+                        metrics = result_or_error.get('metrics', {})
+                        r2 = metrics.get('r2') or metrics.get('R²')
+                        rmse = metrics.get('rmse') or metrics.get('RMSE')
+                        
+                        if r2 is not None:
+                            dialog.append_log(f"✅ {data_name}: 拟合成功 (R²={r2:.4f})")
+                        elif rmse is not None:
+                            dialog.append_log(f"✅ {data_name}: 拟合成功 (RMSE={rmse:.4f})")
+                        else:
+                            dialog.append_log(f"✅ {data_name}: 拟合成功")
+                    except:
+                        dialog.append_log(f"✅ {data_name}: 拟合成功")
+                else:
+                    self._batch_results['failed'] += 1
+                    error_detail = getattr(cmd, 'error', '未知错误')
+                    dialog.append_log(f"❌ {data_name}: Command执行失败 - {error_detail}")
+            except Exception as e:
+                import traceback
+                self._batch_results['failed'] += 1
+                error_trace = traceback.format_exc()
+                print(f"[批量拟合] 后处理失败详情:\n{error_trace}")
+                dialog.append_log(f"❌ {data_name}: 后处理失败 - {str(e)}")
+        else:
+            # 拟合失败
+            self._batch_results['failed'] += 1
+            error_msg = result_or_error if isinstance(result_or_error, str) else "未知错误"
+            dialog.append_log(f"❌ {data_name}: 拟合失败 - {error_msg}")
+        
+        # 更新进度
+        completed = self._batch_results['completed']
+        total = self._batch_results['total']
+        dialog.update_progress(completed, total)
+        
+        # 检查是否全部完成
+        if completed >= total:
+            success_count = self._batch_results['success']
+            dialog.on_fitting_complete(success_count, total)
+            dialog.append_log("=" * 40)
+            dialog.append_log(f"批量拟合完成！")
+            dialog.append_log(f"成功: {success_count}/{total}")
+            dialog.append_log(f"失败: {self._batch_results['failed']}/{total}")
     
     # ========== 工具菜单槽函数 ==========
     

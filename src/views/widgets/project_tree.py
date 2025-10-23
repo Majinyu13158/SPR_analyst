@@ -9,8 +9,8 @@
 4. 支持右键菜单（删除、重命名）
 """
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QTreeWidget, QTreeWidgetItem,
-    QMenu, QInputDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTreeWidget, QTreeWidgetItem,
+    QMenu, QInputDialog, QLineEdit, QComboBox, QPushButton
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QAction
@@ -35,9 +35,12 @@ class ProjectTreeWidget(QWidget):
     new_item_created = Signal(str, str)
     create_figure_from_data = Signal(int)  # data_id
     fit_data_requested = Signal(int)  # data_id
+    batch_fit_requested = Signal(list)  # [data_id1, data_id2, ...]
     change_figure_source = Signal(int)  # figure_id
     view_linked_data = Signal(str, int)  # item_type, item_id
     export_item = Signal(str, int)  # item_type, item_id
+    add_to_comparison = Signal(list)  # [data_id1, data_id2, ...] 添加到对比
+    edit_figure_style = Signal(int)  # figure_id 编辑图表样式
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -62,10 +65,41 @@ class ProjectTreeWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
+        # ========== 搜索栏 ==========
+        search_layout = QHBoxLayout()
+        search_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 搜索图标标签
+        search_label = QLabel("🔍")
+        search_layout.addWidget(search_label)
+        
+        # 搜索输入框
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索项目...")
+        self.search_input.setClearButtonEnabled(True)  # 显示清除按钮
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        search_layout.addWidget(self.search_input, 1)
+        
+        # 类型筛选下拉框
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(["全部", "数据", "图表", "结果"])
+        self.filter_combo.setCurrentIndex(0)
+        self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
+        search_layout.addWidget(self.filter_combo)
+        
+        # 匹配数量标签
+        self.match_label = QLabel("")
+        self.match_label.setStyleSheet("color: #666; font-size: 11px;")
+        search_layout.addWidget(self.match_label)
+        
+        layout.addLayout(search_layout)
+        
         # 树形控件
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        # ⭐ 支持多选（Ctrl/Shift选择多个节点）
+        self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
         # 避免初始焦点绘制高亮（蓝色）
         self.tree.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.tree)
@@ -218,7 +252,42 @@ class ProjectTreeWidget(QWidget):
         # 创建右键菜单
         menu = QMenu(self)
         
-        # ========== 数据节点特定菜单 ==========
+        # ⭐ 检查是否多选数据节点
+        selected_items = self.tree.selectedItems()
+        selected_data_ids = []
+        for selected_item in selected_items:
+            if selected_item in self._item_map:
+                sel_type, sel_id = self._item_map[selected_item]
+                if sel_type == 'data':
+                    selected_data_ids.append(sel_id)
+        
+        # ========== 多选数据节点菜单 ==========
+        if len(selected_data_ids) > 1:
+            # 批量拟合
+            batch_fit_action = QAction(f"批量拟合 ({len(selected_data_ids)}个数据)...", self)
+            batch_fit_action.triggered.connect(
+                lambda: self._on_batch_fit_requested(selected_data_ids)
+            )
+            menu.addAction(batch_fit_action)
+            
+            # ⭐ 添加到对比
+            add_comparison_action = QAction(f"📊 添加到对比 ({len(selected_data_ids)}个数据)", self)
+            add_comparison_action.triggered.connect(
+                lambda: self.add_to_comparison.emit(selected_data_ids)
+            )
+            menu.addAction(add_comparison_action)
+            
+            menu.addSeparator()
+            
+            # 批量导出（未来功能）
+            # batch_export_action = QAction(f"批量导出 ({len(selected_data_ids)}个数据)...", self)
+            # menu.addAction(batch_export_action)
+            
+            # 显示菜单
+            menu.exec(self.tree.viewport().mapToGlobal(position))
+            return
+        
+        # ========== 单选数据节点特定菜单 ==========
         if item_type == 'data':
             # 创建图表
             create_figure_action = QAction("创建图表", self)
@@ -236,6 +305,22 @@ class ProjectTreeWidget(QWidget):
             
             menu.addSeparator()
             
+            # ⭐ 添加到对比
+            add_comparison_action = QAction("📊 添加到对比", self)
+            add_comparison_action.triggered.connect(
+                lambda: self.add_to_comparison.emit([item_id])
+            )
+            menu.addAction(add_comparison_action)
+            
+            menu.addSeparator()
+            
+            # 导出数据
+            export_data_action = QAction("导出数据...", self)
+            export_data_action.triggered.connect(
+                lambda: self.export_item.emit(item_type, item_id)
+            )
+            menu.addAction(export_data_action)
+            
             # 查看关联对象
             view_linked_action = QAction("查看关联对象", self)
             view_linked_action.triggered.connect(
@@ -245,6 +330,15 @@ class ProjectTreeWidget(QWidget):
         
         # ========== 图表节点特定菜单 ==========
         elif item_type == 'figure':
+            # 编辑样式
+            style_action = QAction("🎨 编辑样式", self)
+            style_action.triggered.connect(
+                lambda: self.edit_figure_style.emit(item_id)
+            )
+            menu.addAction(style_action)
+            
+            menu.addSeparator()
+            
             # 更改数据源
             change_source_action = QAction("更改数据源", self)
             change_source_action.triggered.connect(
@@ -428,6 +522,16 @@ class ProjectTreeWidget(QWidget):
         
         self._item_map[item] = ('project', project_id)
     
+    def _on_batch_fit_requested(self, data_ids: list):
+        """
+        处理批量拟合请求
+        
+        参数:
+            data_ids: 数据ID列表
+        """
+        print(f"[ProjectTreeWidget] 批量拟合请求: {len(data_ids)}个数据")
+        self.batch_fit_requested.emit(data_ids)
+    
     def clear_all(self):
         """清空所有节点（保留"点击新建"）"""
         for parent in [self.data_root, self.figure_root, self.result_root, self.project_root]:
@@ -467,3 +571,79 @@ class ProjectTreeWidget(QWidget):
         
         print(f"[ProjectTreeWidget] 警告: 未找到节点 {item_type}:{item_id}")
         return False
+    
+    # ========== 搜索/过滤功能 ==========
+    
+    def _on_search_text_changed(self, text: str):
+        """搜索文本变化时"""
+        self._apply_filter()
+    
+    def _on_filter_changed(self, index: int):
+        """类型筛选变化时"""
+        self._apply_filter()
+    
+    def _apply_filter(self):
+        """应用搜索和过滤"""
+        search_text = self.search_input.text().strip().lower()
+        filter_type = self.filter_combo.currentText()
+        
+        # 计数器
+        match_count = 0
+        total_count = 0
+        
+        # 遍历所有分类根节点
+        type_map = {
+            "数据": self.data_root,
+            "图表": self.figure_root,
+            "结果": self.result_root
+        }
+        
+        for type_name, root in type_map.items():
+            # 如果类型筛选不匹配，隐藏整个分类
+            if filter_type != "全部" and filter_type != type_name:
+                root.setHidden(True)
+                continue
+            else:
+                root.setHidden(False)
+            
+            # 遍历该分类下的所有子节点
+            for i in range(root.childCount()):
+                item = root.child(i)
+                item_text = item.text(0).lower()
+                
+                # 跳过"点击新建"节点
+                if "点击新建" in item_text or "click to create" in item_text:
+                    item.setHidden(False)
+                    continue
+                
+                total_count += 1
+                
+                # 判断是否匹配搜索文本
+                if not search_text or search_text in item_text:
+                    # 匹配，显示
+                    item.setHidden(False)
+                    match_count += 1
+                    
+                    # 递归显示子节点
+                    self._show_all_children(item)
+                else:
+                    # 不匹配，隐藏
+                    item.setHidden(True)
+        
+        # 更新匹配数量标签
+        if search_text or filter_type != "全部":
+            self.match_label.setText(f"显示 {match_count}/{total_count} 项")
+        else:
+            self.match_label.setText("")
+    
+    def _show_all_children(self, item: QTreeWidgetItem):
+        """递归显示所有子节点"""
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child.setHidden(False)
+            self._show_all_children(child)
+    
+    def focus_search(self):
+        """聚焦到搜索框（用于快捷键Ctrl+F）"""
+        self.search_input.setFocus()
+        self.search_input.selectAll()

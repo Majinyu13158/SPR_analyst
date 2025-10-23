@@ -12,8 +12,9 @@ PgCanvasWidget - 基于 PySide6 + pyqtgraph 的高性能绘图适配器
 - 原生支持滚轮缩放/拖拽平移/框选缩放
 - 下采样与视图裁剪，交互更流畅
 """
-from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QMenu
 from PySide6.QtCore import Signal, Qt
+from PySide6.QtGui import QAction, QCursor
 
 import os
 os.environ.setdefault('PYQTGRAPH_QT_LIB', 'PySide6')
@@ -24,6 +25,8 @@ import pyqtgraph as pg
 
 class PgCanvasWidget(QWidget):
     plot_updated = Signal()
+    edit_style_requested = Signal()  # 请求编辑样式
+    export_figure_requested = Signal()  # 请求导出图表
 
     def __init__(self, parent=None, dpi: int = 100):
         super().__init__(parent)
@@ -31,6 +34,7 @@ class PgCanvasWidget(QWidget):
         self._init_pg()
         self._current_state = None  # 持久化视图
         self._series_items = []     # 当前绘制的曲线项
+        self._setup_context_menu()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -94,6 +98,37 @@ class PgCanvasWidget(QWidget):
         except Exception:
             pass
 
+    def _setup_context_menu(self):
+        """设置右键菜单"""
+        self.plot_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.plot_widget.customContextMenuRequested.connect(self._show_context_menu)
+    
+    def _show_context_menu(self, pos):
+        """显示右键菜单"""
+        menu = QMenu(self)
+        
+        # 编辑样式
+        style_action = QAction("🎨 编辑样式", self)
+        style_action.triggered.connect(self.edit_style_requested.emit)
+        menu.addAction(style_action)
+        
+        menu.addSeparator()
+        
+        # 导出图表
+        export_action = QAction("📊 导出图表", self)
+        export_action.triggered.connect(self.export_figure_requested.emit)
+        menu.addAction(export_action)
+        
+        menu.addSeparator()
+        
+        # 重置视图
+        reset_action = QAction("🔄 重置视图", self)
+        reset_action.triggered.connect(lambda: self.plot_widget.enableAutoRange())
+        menu.addAction(reset_action)
+        
+        # 显示菜单
+        menu.exec(self.plot_widget.mapToGlobal(pos))
+    
     def _on_mouse_click(self, ev):
         # 左键双击复位
         if ev is None:
@@ -213,5 +248,71 @@ class PgCanvasWidget(QWidget):
             self.plot_widget.showGrid(x=enable, y=enable, alpha=0.15)
         except Exception:
             pass
+    
+    # ========== 图表导出 ==========
+    def export_image(self, file_path: str, width: int = 1920, height: int = 1080):
+        """
+        导出图表为图片
+        
+        参数:
+            file_path: 保存路径（支持 .png, .jpg, .svg, .pdf等）
+            width: 图片宽度（像素）
+            height: 图片高度（像素）
+        
+        说明:
+            - PNG: 支持，推荐用于高质量输出
+            - JPG: 支持，文件更小但有损
+            - SVG: 支持，矢量格式（pyqtgraph内置）
+            - PDF: 需要安装额外库（可选）
+        """
+        from pathlib import Path
+        file_ext = Path(file_path).suffix.lower()
+        
+        try:
+            if file_ext == '.svg':
+                # SVG矢量格式导出
+                from pyqtgraph.exporters import SVGExporter
+                exporter = SVGExporter(self.plot_widget.plotItem)
+                exporter.export(file_path)
+            
+            elif file_ext == '.pdf':
+                # PDF导出（需要PyQt的QPrinter或通过matplotlib转换）
+                # 方案1：先导出SVG再转PDF（需要额外库）
+                # 方案2：使用ImageExporter导出高分辨率PNG
+                from pyqtgraph.exporters import ImageExporter
+                exporter = ImageExporter(self.plot_widget.plotItem)
+                exporter.parameters()['width'] = width
+                exporter.parameters()['height'] = height
+                # 导出为临时PNG，然后转为PDF
+                temp_png = str(Path(file_path).with_suffix('.png'))
+                exporter.export(temp_png)
+                
+                # 使用PIL转换为PDF
+                try:
+                    from PIL import Image
+                    img = Image.open(temp_png)
+                    img.save(file_path, 'PDF', resolution=300.0)
+                    Path(temp_png).unlink()  # 删除临时文件
+                except ImportError:
+                    # 如果没有PIL，就保留PNG格式
+                    import shutil
+                    shutil.move(temp_png, file_path)
+                    print(f"⚠️ 未安装Pillow，PDF导出为PNG格式: {file_path}")
+            
+            else:
+                # PNG/JPG等位图格式
+                from pyqtgraph.exporters import ImageExporter
+                exporter = ImageExporter(self.plot_widget.plotItem)
+                exporter.parameters()['width'] = width
+                exporter.parameters()['height'] = height
+                exporter.export(file_path)
+            
+            print(f"✅ 图表已导出: {file_path}")
+            return True, None
+            
+        except Exception as e:
+            error_msg = f"导出图表时发生错误:\n{str(e)}"
+            print(f"❌ {error_msg}")
+            return False, error_msg
 
 

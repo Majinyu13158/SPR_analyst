@@ -1,0 +1,44 @@
+{
+  "name": "测试数据C",
+  "itemtype": "dataframe",
+  "dataframe": [
+    {
+      "XValue": 0.0,
+      "YValue": 100.0
+    },
+    {
+      "XValue": 1.0,
+      "YValue": 102.5
+    },
+    {
+      "XValue": 2.0,
+      "YValue": 105.0
+    },
+    {
+      "XValue": 3.0,
+      "YValue": 103.2
+    },
+    {
+      "XValue": 4.0,
+      "YValue": 101.8
+    }
+  ],
+  "attributes": {
+    "calculatedatalist_samplename": "样本C",
+    "calculatedatalist_concentration": 10.0
+  },
+  "extra_attributes": {},
+  "export_info": {
+    "export_time": "2025-10-23T12:01:52.922900",
+    "export_format": "JSON",
+    "export_version": "1.0",
+    "data_shape": {
+      "rows": 5,
+      "columns": 2,
+      "column_names": [
+        "XValue",
+        "YValue"
+      ]
+    }
+  }
+}

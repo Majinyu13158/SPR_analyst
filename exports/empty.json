@@ -1,0 +1,12 @@
+{
+  "name": "空数据",
+  "itemtype": "dataframe",
+  "dataframe": null,
+  "attributes": {},
+  "extra_attributes": {},
+  "export_info": {
+    "export_time": "2025-10-23T12:01:52.946452",
+    "export_format": "JSON",
+    "export_version": "1.0"
+  }
+}

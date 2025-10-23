@@ -24,6 +24,13 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(config.WINDOW_TITLE)
     
+    # 设置应用程序图标
+    import os
+    from PySide6.QtGui import QIcon
+    icon_path = os.path.join(os.path.dirname(__file__), 'app_icon.png')
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+    
     # ⭐ 重置JobManager,清除旧任务和回调
     from src.utils.job_manager import JobManager
     JobManager.reset_instance()
