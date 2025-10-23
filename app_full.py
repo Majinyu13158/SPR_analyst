@@ -24,6 +24,10 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(config.WINDOW_TITLE)
     
+    # ⭐ 重置JobManager,清除旧任务和回调
+    from src.utils.job_manager import JobManager
+    JobManager.reset_instance()
+    
     # 设置应用样式（可选）
     app.setStyle('Fusion')
     

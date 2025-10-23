@@ -154,6 +154,12 @@ class MainWindowFull(QMainWindow):
         # 暴露给Controller连接
         self.fit_action = fit_action
         
+        # 允许再次拟合
+        unlock_fit_action = QAction("允许再次拟合当前数据(&U)", self)
+        unlock_fit_action.setStatusTip("解锁当前数据的拟合熔断标志，允许再次拟合")
+        analysis_menu.addAction(unlock_fit_action)
+        self.unlock_fit_action = unlock_fit_action
+        
         # 视图菜单
         view_menu = menubar.addMenu("视图(&V)")
         

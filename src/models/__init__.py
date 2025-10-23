@@ -9,6 +9,8 @@ from .project_model import Project, ProjectManager, ProjectDetails
 from .link_manager import LinkManager
 from .session_manager import SessionManager
 from .series_model import Series, SeriesManager
+from .provenance import OperationLog, ProvenanceManager
+from .commands import ICommand, CommandManager
 
 __all__ = [
     'Data', 'DataManager',
@@ -17,6 +19,8 @@ __all__ = [
     'Project', 'ProjectManager', 'ProjectDetails',
     'LinkManager',
     'SessionManager',
-    'Series', 'SeriesManager'
+    'Series', 'SeriesManager',
+    'OperationLog', 'ProvenanceManager',
+    'ICommand', 'CommandManager'
 ]
 
