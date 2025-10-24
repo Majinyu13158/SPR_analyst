@@ -187,7 +187,8 @@ class SessionManager(QObject):
                 manifest = self._create_manifest()
                 # 附加schema信息与要求文件
                 manifest.update({
-                    'schema_version': '1.0',
+                    'schema_version': '2.0',
+                    'app': 'SPR Analysis',
                     'required_files': [
                         'manifest.json', 'data.json', 'figures.json',
                         'results.json', 'projects.json', 'links.json'
@@ -225,7 +226,7 @@ class SessionManager(QObject):
                     if ok:
                         data_files_map[str(data_id)] = rel_name
 
-                # 3. 保存数据对象索引（包含文件映射）
+                # 3. 保存数据对象索引（包含文件映射与元信息）
                 data_export = self._export_data_manager(file_map=data_files_map)
                 with open(temp_path / 'data.json', 'w', encoding='utf-8') as f:
                     json.dump(data_export, f, indent=2, ensure_ascii=False)
@@ -379,33 +380,53 @@ class SessionManager(QObject):
             self.created_time = datetime.fromisoformat(created_str)
         # 可选：校验版本
         schema_version = manifest.get('schema_version')
-        if schema_version and schema_version != '1.0':
-            print(f"[SessionManager] 警告：不匹配的schema版本 {schema_version}")
+        if schema_version and schema_version not in ('1.0', '2.0'):
+            print(f"[SessionManager] 警告：未知schema版本 {schema_version}")
     
     def _export_data_manager(self, file_map: Dict[str, str] = None) -> Dict:
-        """导出DataManager数据"""
-        # 简化版本：只导出基本信息
+        """导出DataManager数据（v2.0：包含列/类型/attrs等元信息）"""
+        import pandas as pd  # 延迟导入以避免打包体积
         data_list = []
         for data_id, data in self.data_manager._data_dict.items():
+            df = getattr(data, 'dataframe', None)
+            columns = list(df.columns) if df is not None and not df.empty else []
+            dtypes = {c: str(df[c].dtype) for c in columns} if columns else {}
+            df_attrs = {}
+            try:
+                if df is not None and hasattr(df, 'attrs'):
+                    # 仅存放可JSON化的简单键值
+                    for k, v in df.attrs.items():
+                        if isinstance(v, (str, int, float, bool, type(None))):
+                            df_attrs[k] = v
+            except Exception:
+                df_attrs = {}
             data_info = {
                 'id': data_id,
                 'name': data.name,
+                'itemtype': getattr(data, 'itemtype', 'dataframe'),
                 'type': type(data).__name__,
-                # DataFrame不序列化到JSON，太大了
-                # 可以考虑保存为单独的Parquet文件
+                'columns': columns,
+                'dtypes': dtypes,
+                'row_count': int(len(df)) if df is not None else 0,
+                'df_attrs': df_attrs,
+                'attributes': getattr(data, 'attributes', {}),
+                'extra_attributes': getattr(data, 'extra_attributes', {}),
             }
+            # 写入对应的数据文件相对路径（若存在）
+            file_rel = (file_map or {}).get(str(data_id))
+            if file_rel:
+                data_info['file'] = file_rel
             data_list.append(data_info)
-        
         return {
-            'version': '1.0',
+            'version': '2.0',
             'data_list': data_list,
             'counter': self.data_manager._counter,
-            'files': file_map or {}
         }
     
     def _import_data_manager(self, data: Dict, base_path: Path = None):
-        """导入DataManager数据"""
-        # 从文件映射恢复DataFrame（优先parquet，退化csv）
+        """导入DataManager数据（兼容v1.0/v2.0）"""
+        version = data.get('version', '1.0')
+        # v1.0里，文件映射在顶层'files'
         files_map: Dict[str, str] = data.get('files', {})
         recovered = 0
         if base_path is None:
@@ -413,26 +434,40 @@ class SessionManager(QObject):
         for info in data.get('data_list', []):
             data_id = info.get('id')
             name = info.get('name', f"数据{data_id}")
-            rel = files_map.get(str(data_id))
+            # v2.0若每条包含file字段优先其余，否则退回到顶层files映射
+            rel = info.get('file') or files_map.get(str(data_id))
             df = None
             if rel:
                 fpath = base_path / rel
                 try:
+                    import pandas as pd
                     if fpath.suffix.lower() == '.parquet':
-                        import pandas as pd
                         df = pd.read_parquet(fpath)
                     elif fpath.suffix.lower() == '.csv':
-                        import pandas as pd
                         df = pd.read_csv(fpath)
                 except Exception:
                     df = None
-            # 构造Data对象并保持原ID（使用融合版Data类）
-            data_obj = Data(item=df, itemtype='dataframe', parent=self.data_manager)
+            # 构造Data对象并保持原ID
+            itemtype = info.get('itemtype', 'dataframe')
+            data_obj = Data(item=df, itemtype=itemtype, parent=self.data_manager)
             data_obj.set_name(name)
+            # 恢复属性（v2.0）
+            try:
+                attrs = info.get('attributes', {})
+                extras = info.get('extra_attributes', {})
+                if isinstance(attrs, dict):
+                    data_obj.attributes.update(attrs)
+                if isinstance(extras, dict):
+                    data_obj.extra_attributes.update(extras)
+                # 恢复df.attrs（尽力而为）
+                if df is not None and 'df_attrs' in info and hasattr(df, 'attrs'):
+                    for k, v in info.get('df_attrs', {}).items():
+                        df.attrs[k] = v
+            except Exception:
+                pass
             self.data_manager._data_dict[int(data_id)] = data_obj
             recovered += 1
         # 恢复计数器
-        # 优先使用保存的counter，否则设置为 max_id+1
         saved_counter = data.get('counter')
         if isinstance(saved_counter, int):
             self.data_manager._counter = saved_counter
@@ -441,29 +476,53 @@ class SessionManager(QObject):
         print(f"[SessionManager] 导入了 {recovered} 个数据对象（含DataFrame恢复）")
     
     def _export_figure_manager(self) -> Dict:
-        """导出FigureManager数据"""
+        """导出FigureManager数据（v2.0：完整Figure对象）"""
         figure_list = []
-        for figure_id, figure in self.figure_manager._figures.items():
-            figure_info = {
-                'id': figure.id,
-                'name': figure.name,
-                'figure_type': figure.figure_type,
-                'data_id': figure.data_id
-            }
-            figure_list.append(figure_info)
-        
+        for _, figure in self.figure_manager._figures.items():
+            try:
+                figure_list.append(figure.to_dict())
+            except Exception:
+                # 退化：最小字段
+                figure_list.append({'id': figure.id, 'name': figure.name, 'type': figure.figure_type, 'data_sources': getattr(figure, 'data_sources', [])})
         return {
-            'version': '1.0',
-            'figure_list': figure_list,
-            'next_id': self.figure_manager._next_id  # 修复：_next_id 不是 _counter
+            'version': '2.0',
+            'figures': figure_list,
+            'next_id': self.figure_manager._next_id
         }
     
     def _import_figure_manager(self, data: Dict):
-        """导入FigureManager数据"""
-        # 修复：使用next_id而不是counter
-        self.figure_manager._next_id = data.get('next_id', data.get('counter', 1))
-        # 简化版本：不恢复Figure对象
-        print(f"[SessionManager] 导入了 {len(data.get('figure_list', []))} 个图表对象（简化版）")
+        """导入FigureManager数据（兼容v1.0/v2.0）"""
+        version = data.get('version', '1.0')
+        self.figure_manager.clear()
+        restored = 0
+        if version == '2.0' and 'figures' in data:
+            from .figure_model import Figure
+            for fig_dict in data.get('figures', []):
+                try:
+                    fig = Figure.from_dict(fig_dict, parent=self.figure_manager)
+                    self.figure_manager._figures[fig.id] = fig
+                    # 重新连接信号
+                    fig.figure_updated.connect(lambda fid=fig.id: self.figure_manager.figure_updated.emit(fid))
+                    restored += 1
+                except Exception:
+                    continue
+            # next_id
+            self.figure_manager._next_id = max([f.id for f in self.figure_manager._figures.values()], default=0) + 1
+        else:
+            # v1.0兼容：仅有简化字段
+            for info in data.get('figure_list', []):
+                try:
+                    fid = info.get('id')
+                    name = info.get('name', f'图表{fid}')
+                    ftype = info.get('figure_type', info.get('type', 'line'))
+                    fid_new = self.figure_manager.add_figure(name, ftype)
+                    self.figure_manager._figures[fid_new].id = fid  # 保持原ID
+                    self.figure_manager._figures[fid] = self.figure_manager._figures.pop(fid_new)
+                    restored += 1
+                except Exception:
+                    continue
+            self.figure_manager._next_id = data.get('next_id', data.get('counter', 1))
+        print(f"[SessionManager] 导入图表: {restored} 个")
     
     def _export_result_manager(self) -> Dict:
         """导出ResultManager数据"""
@@ -491,31 +550,85 @@ class SessionManager(QObject):
         print(f"[SessionManager] 导入了 {len(data.get('result_list', []))} 个结果对象（简化版）")
     
     def _export_project_manager(self) -> Dict:
-        """导出ProjectManager数据"""
+        """导出ProjectManager数据（v2.0：完整项目信息）"""
         project_list = []
-        for project_id, project in self.project_manager._projects.items():
-            project_info = {
-                'id': project.id,
-                'name': project.name,
-                'data_ids': project.data_ids,
-                'figure_ids': project.figure_ids,
-                'result_ids': project.result_ids
-            }
-            project_list.append(project_info)
-        
+        for _, project in self.project_manager._projects.items():
+            try:
+                project_list.append(project.to_dict())
+            except Exception:
+                project_list.append({
+                    'id': project.id,
+                    'name': project.name,
+                    'data_ids': project.data_ids,
+                    'figure_ids': project.figure_ids,
+                    'result_ids': project.result_ids,
+                    'is_active': getattr(project, 'is_active', True)
+                })
         return {
-            'version': '1.0',
-            'project_list': project_list,
-            'next_id': self.project_manager._next_id,  # 修复：_next_id 不是 _counter
+            'version': '2.0',
+            'projects': project_list,
+            'next_id': self.project_manager._next_id,
             'current_project_id': self.project_manager._current_project_id
         }
     
     def _import_project_manager(self, data: Dict):
-        """导入ProjectManager数据"""
-        # 修复：使用next_id而不是counter
-        self.project_manager._next_id = data.get('next_id', data.get('counter', 1))
-        self.project_manager._current_project_id = data.get('current_project_id')
-        print(f"[SessionManager] 导入了 {len(data.get('project_list', []))} 个项目对象（简化版）")
+        """导入ProjectManager数据（兼容v1.0/v2.0）"""
+        self.project_manager.clear()
+        restored = 0
+        version = data.get('version', '1.0')
+        if version == '2.0' and 'projects' in data:
+            for p in data.get('projects', []):
+                try:
+                    from .project_model import Project
+                    proj = Project(self.project_manager)
+                    proj.id = p.get('id', 0)
+                    proj.name = p.get('name', '未命名项目')
+                    # 时间
+                    try:
+                        proj.created_time = datetime.fromisoformat(p.get('created_time')) if p.get('created_time') else datetime.now()
+                        proj.modified_time = datetime.fromisoformat(p.get('modified_time')) if p.get('modified_time') else proj.created_time
+                    except Exception:
+                        pass
+                    # 详情
+                    if 'details' in p and hasattr(proj, 'details'):
+                        try:
+                            proj.details.from_dict(p['details'])
+                        except Exception:
+                            pass
+                    proj.data_ids = p.get('data_ids', [])
+                    proj.figure_ids = p.get('figure_ids', [])
+                    proj.result_ids = p.get('result_ids', [])
+                    proj.is_active = p.get('is_active', True)
+                    # 放入管理器
+                    self.project_manager._projects[proj.id] = proj
+                    # 信号绑定
+                    proj.project_updated.connect(lambda pid=proj.id: self.project_manager.project_updated.emit(pid))
+                    restored += 1
+                except Exception:
+                    continue
+            self.project_manager._next_id = max([p.id for p in self.project_manager._projects.values()], default=0) + 1
+            self.project_manager._current_project_id = data.get('current_project_id')
+        else:
+            # v1.0兼容
+            for p in data.get('project_list', []):
+                try:
+                    pid = p.get('id')
+                    name = p.get('name', f'项目{pid}')
+                    _ = self.project_manager.create_project(name)
+                    # 替换成原ID
+                    proj = self.project_manager._projects.pop(self.project_manager._next_id - 1)
+                    proj.id = pid
+                    proj.name = name
+                    proj.data_ids = p.get('data_ids', [])
+                    proj.figure_ids = p.get('figure_ids', [])
+                    proj.result_ids = p.get('result_ids', [])
+                    self.project_manager._projects[pid] = proj
+                    restored += 1
+                except Exception:
+                    continue
+            self.project_manager._next_id = data.get('next_id', data.get('counter', 1))
+            self.project_manager._current_project_id = data.get('current_project_id')
+        print(f"[SessionManager] 导入项目: {restored} 个")
 
     # ========== 基础校验 ==========
     def _validate_unpacked(self, base_path: Path) -> bool:
