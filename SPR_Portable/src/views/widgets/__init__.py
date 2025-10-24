@@ -6,7 +6,7 @@ from .draggable_label import DraggableLabel
 from .project_tree import ProjectTreeWidget
 from .data_tables import DataTableWidget, ResultTableWidget, ProjectDetailTableWidget
 from .canvas_widget import CanvasWidget
-from .session_stats import SessionStatsWidget
+from .series_tree import SeriesTreeWidget
 
 __all__ = [
     'DraggableLabel',
@@ -15,6 +15,6 @@ __all__ = [
     'ResultTableWidget',
     'ProjectDetailTableWidget',
     'CanvasWidget',
-    'SessionStatsWidget'
+    'SeriesTreeWidget'
 ]
 

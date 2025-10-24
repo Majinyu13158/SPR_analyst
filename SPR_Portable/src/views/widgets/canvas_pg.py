@@ -13,7 +13,7 @@ PgCanvasWidget - 基于 PySide6 + pyqtgraph 的高性能绘图适配器
 - 下采样与视图裁剪，交互更流畅
 """
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QMenu
-from PySide6.QtCore import Signal, Qt, QEvent
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QAction, QCursor
 
 import os
@@ -25,7 +25,6 @@ import pyqtgraph as pg
 
 class PgCanvasWidget(QWidget):
     plot_updated = Signal()
-    data_dropped = Signal(list)  # 拖拽进来的数据ID列表
     edit_style_requested = Signal()  # 请求编辑样式
     export_figure_requested = Signal()  # 请求导出图表
 
@@ -43,11 +42,6 @@ class PgCanvasWidget(QWidget):
         layout.setSpacing(0)
         self.plot_widget = pg.PlotWidget()
         layout.addWidget(self.plot_widget)
-        # 接受拖拽
-        try:
-            self.setAcceptDrops(True)
-        except Exception:
-            pass
 
     def _init_pg(self):
         # 全局配置
@@ -224,40 +218,6 @@ class PgCanvasWidget(QWidget):
         self.set_title(title)
         self._persist_view()
         self.plot_updated.emit()
-
-    # ========== 拖放事件 ==========
-    def dragEnterEvent(self, event):
-        try:
-            mime = event.mimeData()
-            if mime and (mime.hasText() or mime.hasUrls() or mime.hasFormat('application/x-spr-data-ids')):
-                event.acceptProposedAction()
-            else:
-                event.ignore()
-        except Exception:
-            event.ignore()
-
-    def dropEvent(self, event):
-        ids = []
-        try:
-            mime = event.mimeData()
-            if mime.hasFormat('application/x-spr-data-ids'):
-                import json
-                raw = bytes(mime.data('application/x-spr-data-ids')).decode('utf-8', errors='ignore')
-                ids = json.loads(raw) if raw else []
-            elif mime.hasText():
-                # 兼容：纯文本以逗号分隔的ID
-                text = mime.text()
-                ids = [int(x) for x in text.split(',') if x.strip().isdigit()]
-        except Exception:
-            ids = []
-        if ids:
-            try:
-                self.data_dropped.emit(ids)
-            except Exception:
-                pass
-            event.acceptProposedAction()
-        else:
-            event.ignore()
 
     def clear_plot(self):
         self._clear_items()

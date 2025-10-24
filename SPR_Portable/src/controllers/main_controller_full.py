@@ -129,11 +129,6 @@ class MainControllerFull(QObject):
         if hasattr(self.view, 'canvas_widget'):
             self.view.canvas_widget.edit_style_requested.connect(self._on_canvas_edit_style)
             self.view.canvas_widget.export_figure_requested.connect(self._on_canvas_export_figure)
-            # 拖拽叠加：接受数据ID列表
-            try:
-                self.view.canvas_widget.data_dropped.connect(self._on_canvas_data_dropped)
-            except Exception:
-                pass
         
         # 树形控件 -> Controller
         self.view.project_tree.new_item_created.connect(self.on_new_item_created)
@@ -165,11 +160,6 @@ class MainControllerFull(QObject):
             self.view.undo_action.triggered.connect(self.on_undo_requested)
         if hasattr(self.view, 'redo_action'):
             self.view.redo_action.triggered.connect(self.on_redo_requested)
-        # 工具栏撤销/重做与相同槽函数连接
-        if hasattr(self.view, 'toolbar_undo_action'):
-            self.view.toolbar_undo_action.triggered.connect(self.on_undo_requested)
-        if hasattr(self.view, 'toolbar_redo_action'):
-            self.view.toolbar_redo_action.triggered.connect(self.on_redo_requested)
         if hasattr(self.view, 'history_action'):
             self.view.history_action.triggered.connect(self.on_show_history)
         if hasattr(self.view, 'search_action'):
@@ -724,68 +714,6 @@ class MainControllerFull(QObject):
             self.view.canvas_widget.set_title(cfg.get('title', ''))
             self.view.canvas_widget.set_xlabel(cfg.get('xlabel', 'Time (s)'))
             self.view.canvas_widget.set_ylabel(cfg.get('ylabel', 'Response (RU)'))
-
-    def _append_curves_to_canvas(self, pairs: list):
-        """
-        将多条(x,y,label)追加绘制到当前pg画布。
-        pairs: [(label, x, y)]
-        """
-        try:
-            # 读取当前已有曲线后，合并并重绘
-            data_dict = {}
-            # 取已有曲线无法直接读回，改为一次性重绘：先清，再全部画
-            # 为避免清空用户已有曲线，这里直接叠加调用plot
-            for label, x, y in pairs:
-                self.view.canvas_widget.plot_widget.plot(x, y, pen=pg.mkPen(width=2), name=str(label))
-        except Exception:
-            # 兜底：单条绘制
-            for label, x, y in pairs:
-                try:
-                    self.view.show_plot(x, y, label=str(label))
-                except Exception:
-                    pass
-
-    def _collect_xy_for_data_ids(self, data_ids: list):
-        pairs = []
-        for data_id in data_ids:
-            data = self.data_manager.get_data(data_id)
-            if not data or data.dataframe is None or data.dataframe.empty:
-                continue
-            try:
-                x, y = data.get_xy_data()
-                pairs.append((data.name, x, y))
-            except Exception:
-                pass
-        return pairs
-
-    def _on_canvas_data_dropped(self, data_ids: list):
-        """画布上收到数据ID列表，叠加绘制"""
-        if not data_ids:
-            return
-        pairs = self._collect_xy_for_data_ids(data_ids)
-        if not pairs:
-            self.view.update_status("拖入的数据无有效曲线")
-            return
-        # 切换到图表页
-        try:
-            self.view.tab_widget.setCurrentIndex(1)
-        except Exception:
-            pass
-        # 叠加绘制
-        try:
-            import pyqtgraph as pg
-            colors = ['#1a73e8', '#ea4335', '#34a853', '#fbbc04', '#ff6d00', '#ab47bc', '#46bdc6', '#7a3cff']
-            for idx, (label, x, y) in enumerate(pairs):
-                pen = pg.mkPen(color=colors[idx % len(colors)], width=2)
-                self.view.canvas_widget.plot_widget.plot(x, y, pen=pen, name=str(label))
-        except Exception:
-            # 回退到单条绘制
-            for label, x, y in pairs:
-                try:
-                    self.view.show_plot(x, y, label=str(label))
-                except Exception:
-                    pass
-        self.view.update_status(f"已叠加绘制 {len(pairs)} 条曲线")
     
     @Slot(int)
     def on_result_added(self, result_id: int):

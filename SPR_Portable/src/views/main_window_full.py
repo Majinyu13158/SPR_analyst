@@ -332,25 +332,6 @@ class MainWindowFull(QMainWindow):
         self.toolbar_import_action = import_action
         self.toolbar_open_session_action = open_action
         self.toolbar_save_action = save_action
-
-        # 会话统计切换
-        stats_toggle = QAction("📈 会话统计", self)
-        stats_toggle.setCheckable(True)
-        stats_toggle.setChecked(False)
-        stats_toggle.setStatusTip("显示/隐藏会话统计面板")
-        def _toggle_stats(checked):
-            try:
-                if hasattr(self, 'stats_dock') and self.stats_dock is not None:
-                    if checked:
-                        self.stats_dock.show()
-                    else:
-                        self.stats_dock.hide()
-            except Exception:
-                pass
-        stats_toggle.triggered.connect(_toggle_stats)
-        toolbar.addSeparator()
-        toolbar.addAction(stats_toggle)
-        self.toolbar_stats_toggle_action = stats_toggle
     
     def _create_left_docks(self):
         """创建左侧可停靠面板（项目树）"""
@@ -361,12 +342,6 @@ class MainWindowFull(QMainWindow):
         self.data_dock.setWidget(self.project_tree)
         self.data_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.data_dock)
-        try:
-            # 增大初始宽度
-            self.data_dock.setMinimumWidth(260)
-            self.data_dock.resize(300, self.data_dock.height())
-        except Exception:
-            pass
     
     def _create_center_panel(self) -> QWidget:
         """创建中间面板"""
@@ -414,18 +389,6 @@ class MainWindowFull(QMainWindow):
 
         layout.addWidget(self.tab_widget)
 
-        # 右侧Dock：会话统计（默认创建但隐藏，工具栏按钮控制显示）
-        try:
-            from PySide6.QtWidgets import QDockWidget
-            from .widgets import SessionStatsWidget
-            self.session_stats = SessionStatsWidget()
-            self.stats_dock = QDockWidget("会话统计", self)
-            self.stats_dock.setWidget(self.session_stats)
-            self.addDockWidget(Qt.RightDockWidgetArea, self.stats_dock)
-            self.stats_dock.hide()  # 默认隐藏
-        except Exception:
-            pass
-
         # 主工作区拖放：为Tab安装过滤器
         try:
             self._drop_filter = MainAreaDropFilter(self)
@@ -462,14 +425,6 @@ class MainWindowFull(QMainWindow):
 
         # 拦截关闭事件：提示未保存
         self.installEventFilter(self)
-
-        # 将SessionManager注入统计面板（由Controller创建后回填）
-        try:
-            if hasattr(self, 'controller') and hasattr(self.controller, 'session_manager'):
-                if hasattr(self, 'session_stats'):
-                    self.session_stats.set_session_manager(self.controller.session_manager)
-        except Exception:
-            pass
     
     def _apply_styles(self):
         """应用样式"""

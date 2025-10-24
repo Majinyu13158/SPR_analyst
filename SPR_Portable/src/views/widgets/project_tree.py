@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTreeWidget, QTreeWidgetItem,
     QMenu, QInputDialog, QLineEdit, QComboBox, QPushButton
 )
-from PySide6.QtCore import Signal, Qt, QMimeData
-from PySide6.QtGui import QAction, QDrag
+from PySide6.QtCore import Signal, Qt
+from PySide6.QtGui import QAction
 
 
 class ProjectTreeWidget(QWidget):
@@ -100,8 +100,6 @@ class ProjectTreeWidget(QWidget):
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         # ⭐ 支持多选（Ctrl/Shift选择多个节点）
         self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
-        # 启用拖拽作为源
-        self.tree.setDragEnabled(True)
         # 避免初始焦点绘制高亮（蓝色）
         self.tree.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.tree)
@@ -192,11 +190,6 @@ class ProjectTreeWidget(QWidget):
         """连接信号"""
         self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
-        # 覆盖默认 startDrag 实现
-        try:
-            self.tree.startDrag = self._start_drag
-        except Exception:
-            pass
     
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
         """处理节点点击"""
@@ -421,30 +414,6 @@ class ProjectTreeWidget(QWidget):
         # 显示菜单
         menu.exec(self.tree.viewport().mapToGlobal(position))
     
-    def _start_drag(self, supportedActions):
-        """自定义拖拽，打包选中的数据节点ID列表"""
-        try:
-            selected = self.tree.selectedItems()
-            data_ids = []
-            for it in selected:
-                if it in self._item_map:
-                    t, v = self._item_map[it]
-                    if t == 'data':
-                        try:
-                            data_ids.append(int(v))
-                        except Exception:
-                            pass
-            if not data_ids:
-                return
-            import json
-            mime = QMimeData()
-            mime.setData('application/x-spr-data-ids', bytes(json.dumps(data_ids), 'utf-8'))
-            drag = QDrag(self.tree)
-            drag.setMimeData(mime)
-            drag.exec(Qt.CopyAction)
-        except Exception:
-            pass
-
     def _view_fit_curve(self, result_id: int):
         """查看拟合曲线（内部方法）"""
         # 通过view_linked_data信号通知Controller
