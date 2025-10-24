@@ -523,15 +523,19 @@ class ProjectTreeWidget(QWidget):
         
         return group_item
     
-    def add_figure_item(self, figure_id: int, name: str):
-        """添加图形节点"""
+    def add_figure_item(self, figure_id: int, name: str, parent_item=None):
+        """添加图形节点（可选父节点）"""
         item = QTreeWidgetItem()
         item.setText(0, f"{name}")
         
-        insert_index = self.figure_root.childCount() - 1
-        self.figure_root.insertChild(insert_index, item)
+        if parent_item is not None:
+            parent_item.addChild(item)
+        else:
+            insert_index = self.figure_root.childCount() - 1
+            self.figure_root.insertChild(insert_index, item)
         
         self._item_map[item] = ('figure', figure_id)
+        return item
     
     def add_result_item(self, result_id: int, name: str):
         """添加结果节点"""

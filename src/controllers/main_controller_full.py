@@ -104,6 +104,8 @@ class MainControllerFull(QObject):
         self.current_data_id: Optional[int] = None
         self.current_figure_id: Optional[int] = None
         self.current_result_id: Optional[int] = None
+        # 控制：在批量创建图形时抑制自动树节点添加，避免重复顶级项
+        self._suppress_figure_added_hook: bool = False
         
         # 连接信号
         self._connect_signals()
@@ -575,51 +577,77 @@ class MainControllerFull(QObject):
                     time_vals = data.dataframe['Time'].values
                     # 在树上创建父节点（若还未创建）
                     parent_item = self.view.project_tree.add_data_item(data_id, data.name)
+                    child_fig_items = []
                     for col in cols:
                         sub_df = pd.DataFrame({'XValue': pd.to_numeric(time_vals, errors='coerce'),
                                                'YValue': pd.to_numeric(data.dataframe[str(col)].values, errors='coerce')})
+                        # 抑制子数据作为顶级节点出现（避免冗余顶级项）
+                        try:
+                            sub_df.attrs['suppress_top_level_node'] = True
+                        except Exception:
+                            pass
                         child_name = f"{base_name} - {str(col)}"
                         child_id = self.data_manager.add_data(child_name, sub_df)
                         # 父→子链接
                         self.link_manager.create_link('data', data_id, 'data', child_id, link_type='split_sample', metadata={'column': str(col)})
                         self.view.project_tree.add_data_item(child_id, child_name, parent_item=parent_item)
-                        # 为每个新子节点自动创建并显示一幅图像（单曲线）
-                        try:
-                            figure_id = self.figure_manager.add_figure(f"{child_name} - 数据图", "line")
-                            figure = self.figure_manager.get_figure(figure_id)
-                            figure.add_data_source(child_id, {
-                                'label': child_name,
-                                'color': '#1a73e8',
-                                'linewidth': 2.0,
-                                'marker': 'o',
-                                'markersize': 3.0
-                            })
-                            self.link_manager.create_link('data', child_id, 'figure', figure_id, link_type='visualize')
-                        except Exception:
-                            pass
+                        # 注：不再在顶级图形下生成每个子数据的单独图
                     # 避免重复生成
                     del attrs['wide_parent_children_cols']
                     del attrs['wide_parent_base_name']
                     print(f"[Controller] 已为宽表父节点生成子节点: parent={data_id}")
-                    # 同时为父节点创建一张多曲线图
+                    # 同时为父节点创建一张多曲线总图（唯一顶级图形）
                     try:
+                        # 批量创建期间暂时抑制figure_added钩子自动插入顶级节点
+                        self._suppress_figure_added_hook = True
                         parent_figure_id = self.figure_manager.add_figure(f"{data.name} - 多曲线", "line")
+                        parent_fig_item = self.view.project_tree.add_figure_item(parent_figure_id, f"{data.name} - 多曲线")
                         fig = self.figure_manager.get_figure(parent_figure_id)
-                        fig.add_data_source(data_id, {
-                            'label': data.name,
-                            'color': '#1a73e8',
-                            'linewidth': 2.0,
-                            'marker': 'none'
-                        })
-                        self.link_manager.create_link('data', data_id, 'figure', parent_figure_id, link_type='visualize')
+                        # 将所有子数据加入总图
+                        targets = self.link_manager.get_targets('data', data_id, link_type='split_sample')
+                        for t_type, child_id in targets:
+                            if t_type != 'data':
+                                continue
+                            fig.add_data_source(child_id, {
+                                'label': self.data_manager.get_data(child_id).name if self.data_manager.get_data(child_id) else str(child_id),
+                                'color': '#1a73e8',
+                                'linewidth': 2.0,
+                                'marker': 'none'
+                            })
+                            self.link_manager.create_link('data', child_id, 'figure', parent_figure_id, link_type='visualize')
+                            # 为每个子数据生成其“数据图”并作为总图的子节点挂载
+                            try:
+                                child_fig_id = self.figure_manager.add_figure(f"{self.data_manager.get_data(child_id).name} - 数据图", "line")
+                                child_fig = self.figure_manager.get_figure(child_fig_id)
+                                child_fig.add_data_source(child_id, {
+                                    'label': self.data_manager.get_data(child_id).name,
+                                    'color': '#1a73e8',
+                                    'linewidth': 2.0,
+                                    'marker': 'o',
+                                    'markersize': 3.0
+                                })
+                                self.link_manager.create_link('data', child_id, 'figure', child_fig_id, link_type='visualize')
+                                # 将子图作为树节点挂到总图之下
+                                self.view.project_tree.add_figure_item(child_fig_id, f"{self.data_manager.get_data(child_id).name} - 数据图", parent_item=parent_fig_item)
+                            except Exception:
+                                pass
+                        # 迁移（可选）子图：不创建顶级子图，若已有则作为子节点显示
+                        # 恢复钩子
+                        self._suppress_figure_added_hook = False
                         self.on_figure_selected(parent_figure_id)
                     except Exception:
+                        self._suppress_figure_added_hook = False
                         pass
                     return
                 except Exception as e:
                     print(f"[Controller] 生成子节点失败: {e}")
         
-        # 情况1和2：添加到树
+        # 情况1和2：添加到树（若未标记抑制）
+        try:
+            if data.dataframe is not None and hasattr(data.dataframe, 'attrs') and data.dataframe.attrs.get('suppress_top_level_node'):
+                return
+        except Exception:
+            pass
         self.view.add_data_to_tree(data_id, data.name)
         print(f"[Controller] 添加数据到树: {data.name}")
     
@@ -666,6 +694,8 @@ class MainControllerFull(QObject):
     @Slot(int)
     def on_figure_added(self, figure_id: int):
         """图表添加后"""
+        if getattr(self, '_suppress_figure_added_hook', False):
+            return
         figure = self.figure_manager.get_figure(figure_id)
         if figure:
             self.view.add_figure_to_tree(figure_id, figure.name)
