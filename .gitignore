@@ -32,3 +32,5 @@ data/temp/
 *.spec
 dir_structure.txt
 
+#环境
+venv/
